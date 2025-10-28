@@ -1,8 +1,10 @@
 # wakebot.py
-import os, time, json, sqlite3, requests
+import os, time, json, sqlite3, requests, threading
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter, Retry
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ------------- .env -------------
 load_dotenv(override=True)
@@ -29,10 +31,11 @@ CHAINS = [c.strip().lower() for c in os.getenv("CHAINS","base,solana,ethereum").
 # цикл/алерты
 COOLDOWN_MIN   = int(os.getenv("COOLDOWN_MIN","30"))
 LOOP_SECONDS   = int(os.getenv("LOOP_SECONDS","60"))
+CHAIN_SCAN_WORKERS = max(1, int(os.getenv("CHAIN_SCAN_WORKERS", "4")))
 
 # лог кандидатов
 SAVE_CANDIDATES = as_bool(os.getenv("SAVE_CANDIDATES","true"))
-CANDIDATES_PATH = os.getenv("CANDIDATES_PATH","candidates.jsonl")
+CANDIDATES_PATH = Path(os.getenv("CANDIDATES_PATH","candidates.jsonl")).expanduser()
 
 # охват поиска
 SCAN_BY_DEX              = as_bool(os.getenv("SCAN_BY_DEX","true"))
@@ -42,6 +45,7 @@ USE_TWO_CHAR_BUCKETS     = as_bool(os.getenv("USE_TWO_CHAR_BUCKETS","true"))
 MAX_BUCKETS_PER_CHAIN    = int(os.getenv("MAX_BUCKETS_PER_CHAIN","200"))
 BUCKET_DELAY_SEC         = float(os.getenv("BUCKET_DELAY_SEC","0.05"))
 MAX_PAIRS_PER_DEX        = int(os.getenv("MAX_PAIRS_PER_DEX","5000"))
+BUCKET_SEARCH_TARGET     = int(os.getenv("BUCKET_SEARCH_TARGET","250"))
 
 # какие DEX-ы сканировать
 DEXES_BY_CHAIN = {
@@ -51,7 +55,7 @@ DEXES_BY_CHAIN = {
 }
 
 # БД
-DB_PATH = os.getenv("DB_PATH","wake_state.sqlite")
+DB_PATH = Path(os.getenv("DB_PATH","wake_state.sqlite")).expanduser()
 
 # мейджоры/нативки (не хотим как baseToken)
 MAJOR_BASE_SYMBOLS = {
@@ -70,16 +74,27 @@ NATIVE_SYMBOLS = {
 }
 
 # ------------- HTTP SESSION -------------
-SESSION = requests.Session()
-SESSION.headers.update({"User-Agent":"wakebot/1.0"})
-SESSION.mount(
-    "https://",
-    HTTPAdapter(max_retries=Retry(
-        total=3, backoff_factor=0.6,
-        status_forcelist=[429,500,502,503,504],
-        allowed_methods=frozenset(["GET","POST"])
-    ))
-)
+_SESSION_LOCAL = threading.local()
+
+def _build_session():
+    session = requests.Session()
+    session.headers.update({"User-Agent":"wakebot/1.0"})
+    session.mount(
+        "https://",
+        HTTPAdapter(max_retries=Retry(
+            total=3, backoff_factor=0.6,
+            status_forcelist=[429,500,502,503,504],
+            allowed_methods=frozenset(["GET","POST"])
+        ))
+    )
+    return session
+
+def http_session():
+    session = getattr(_SESSION_LOCAL, "session", None)
+    if session is None:
+        session = _build_session()
+        _SESSION_LOCAL.session = session
+    return session
 
 # ------------- UTILS -------------
 def now_utc(): return datetime.now(timezone.utc)
@@ -93,11 +108,14 @@ def nice(x):
         return f"{v:.2f}"
     except: return "n/a"
 
+_CANDIDATE_LOG_LOCK = threading.Lock()
+
+
 def tg_send(text):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("TG>", text); return
     try:
-        SESSION.post(
+        http_session().post(
             f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
             json={"chat_id": TG_CHAT_ID, "text": text, "disable_web_page_preview": True},
             timeout=12
@@ -107,7 +125,10 @@ def tg_send(text):
 
 def save_jsonl(path, obj):
     try:
-        with open(path,"a",encoding="utf-8") as f:
+        p = Path(path).expanduser()
+        if not p.parent.exists():
+            p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a",encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False)+"\n")
     except Exception as e:
         print("save_jsonl error:", e)
@@ -127,7 +148,10 @@ def is_base_ok(base_token: dict, chain: str) -> bool:
 
 # ------------- STORAGE -------------
 def db_conn():
-    conn = sqlite3.connect(DB_PATH)
+    db_path = Path(DB_PATH).expanduser()
+    if not db_path.parent.exists():
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
     conn.execute("""
       CREATE TABLE IF NOT EXISTS state(
         pool TEXT PRIMARY KEY,
@@ -160,7 +184,7 @@ def _make_buckets():
 def _fetch_pairs_by_dex(chain: str, dex_id: str):
     url = f"{DEXSCREENER_BASE}/pairs/{chain}/{dex_id}"
     try:
-        r = SESSION.get(url, timeout=30)
+        r = http_session().get(url, timeout=30)
         r.raise_for_status()
         return (r.json() or {}).get("pairs", []) or []
     except Exception as e:
@@ -172,7 +196,7 @@ def _bucketed_search(chain: str, native_raw: str):
     for b in _make_buckets():
         url = f"{DEXSCREENER_BASE}/search?q={native_raw}%20{b}"
         try:
-            r = SESSION.get(url, timeout=25); r.raise_for_status()
+            r = http_session().get(url, timeout=15); r.raise_for_status()
             pairs = (r.json() or {}).get("pairs", []) or []
         except Exception:
             time.sleep(BUCKET_DELAY_SEC); continue
@@ -182,6 +206,8 @@ def _bucketed_search(chain: str, native_raw: str):
             if not pid or pid in seen: continue
             seen.add(pid); acc.append(p)
         time.sleep(BUCKET_DELAY_SEC)
+        if BUCKET_SEARCH_TARGET > 0 and len(acc) >= BUCKET_SEARCH_TARGET:
+            break
     return acc
 
 def ds_search_native_pairs(chain: str):
@@ -198,10 +224,17 @@ def ds_search_native_pairs(chain: str):
     all_pairs, scanned = [], 0
 
     if SCAN_BY_DEX:
-        for dex_id in DEXES_BY_CHAIN.get(chain, []):
-            pairs = _fetch_pairs_by_dex(chain, dex_id)
-            if not pairs: continue
-            scanned += len(pairs); all_pairs.extend(pairs[:MAX_PAIRS_PER_DEX])
+        dexes = DEXES_BY_CHAIN.get(chain, [])
+        if dexes:
+            max_workers = min(len(dexes), 8)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {pool.submit(_fetch_pairs_by_dex, chain, dex_id): dex_id for dex_id in dexes}
+                for fut in as_completed(futures):
+                    pairs = fut.result()
+                    if not pairs:
+                        continue
+                    scanned += len(pairs)
+                    all_pairs.extend(pairs[:MAX_PAIRS_PER_DEX])
 
     if FALLBACK_BUCKETED_SEARCH and scanned < 200:
         buckets = _bucketed_search(chain, native_raw)
@@ -277,14 +310,15 @@ def ds_search_native_pairs(chain: str):
 def dump_candidate(rec: dict):
     if not SAVE_CANDIDATES: return
     out = dict(rec); out["ts"] = now_utc().isoformat()
-    save_jsonl(CANDIDATES_PATH, out)
+    with _CANDIDATE_LOG_LOCK:
+        save_jsonl(CANDIDATES_PATH, out)
 
 # ------------- GECKO (vol5m/vol24h/tx5m) -------------
 def fetch_gecko_for_pool(chain, pool_addr):
     gecko_chain = "ethereum" if chain == "ethereum" else chain
     url = f"{GECKO_BASE}/networks/{gecko_chain}/pools/{pool_addr}"
     try:
-        r = SESSION.get(url, timeout=20)
+        r = http_session().get(url, timeout=20)
         if r.status_code == 404: return 0.0, 0, 0.0
         r.raise_for_status()
         a = (r.json() or {}).get("data", {}).get("attributes", {}) or {}
@@ -341,24 +375,38 @@ def main():
     conn = db_conn()
 
     while True:
+        cycle_started = time.monotonic()
         total_scanned = 0
         total_cands   = 0
 
-        for chain in CHAINS:
-            try:
-                cands, scanned = ds_search_native_pairs(chain)
-                total_scanned += scanned
-                total_cands   += len(cands)
+        chain_results = []
+        if CHAINS:
+            max_workers = min(len(CHAINS), CHAIN_SCAN_WORKERS)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_chain = {pool.submit(ds_search_native_pairs, chain): chain for chain in CHAINS}
+                for fut in as_completed(future_to_chain):
+                    chain = future_to_chain[fut]
+                    try:
+                        chain_results.append((chain, *fut.result()))
+                    except Exception as e:
+                        print(f"[{chain}] error:", e)
 
-                # триггеры
-                for meta in cands:
-                    maybe_alert(conn, meta)
+        if len(chain_results) > 1:
+            chain_order = {chain: idx for idx, chain in enumerate(CHAINS)}
+            chain_results.sort(key=lambda item: chain_order.get(item[0], 0))
 
-            except Exception as e:
-                print(f"[{chain}] error:", e)
+        for chain, cands, scanned in chain_results:
+            total_scanned += scanned
+            total_cands   += len(cands)
 
-        print(f"[cycle] scanned total: {total_scanned}, candidates total: {total_cands}")
-        time.sleep(LOOP_SECONDS)
+            for meta in cands:
+                maybe_alert(conn, meta)
+
+        elapsed = time.monotonic() - cycle_started
+        print(f"[cycle] scanned total: {total_scanned}, candidates total: {total_cands}, took {elapsed:.2f}s")
+        sleep_for = max(0.0, LOOP_SECONDS - elapsed)
+        if sleep_for:
+            time.sleep(sleep_for)
 
 if __name__ == "__main__":
     main()
