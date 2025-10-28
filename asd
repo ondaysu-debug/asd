@@ -31,6 +31,7 @@ CHAINS = [c.strip().lower() for c in os.getenv("CHAINS","base,solana,ethereum").
 # цикл/алерты
 COOLDOWN_MIN   = int(os.getenv("COOLDOWN_MIN","30"))
 LOOP_SECONDS   = int(os.getenv("LOOP_SECONDS","60"))
+CHAIN_SCAN_WORKERS = max(1, int(os.getenv("CHAIN_SCAN_WORKERS", "4")))
 
 # лог кандидатов
 SAVE_CANDIDATES = as_bool(os.getenv("SAVE_CANDIDATES","true"))
@@ -44,6 +45,7 @@ USE_TWO_CHAR_BUCKETS     = as_bool(os.getenv("USE_TWO_CHAR_BUCKETS","true"))
 MAX_BUCKETS_PER_CHAIN    = int(os.getenv("MAX_BUCKETS_PER_CHAIN","200"))
 BUCKET_DELAY_SEC         = float(os.getenv("BUCKET_DELAY_SEC","0.05"))
 MAX_PAIRS_PER_DEX        = int(os.getenv("MAX_PAIRS_PER_DEX","5000"))
+BUCKET_SEARCH_TARGET     = int(os.getenv("BUCKET_SEARCH_TARGET","250"))
 
 # какие DEX-ы сканировать
 DEXES_BY_CHAIN = {
@@ -105,6 +107,9 @@ def nice(x):
         if v>=1_000:         return f"{v/1_000:.2f}k"
         return f"{v:.2f}"
     except: return "n/a"
+
+_CANDIDATE_LOG_LOCK = threading.Lock()
+
 
 def tg_send(text):
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
@@ -191,7 +196,7 @@ def _bucketed_search(chain: str, native_raw: str):
     for b in _make_buckets():
         url = f"{DEXSCREENER_BASE}/search?q={native_raw}%20{b}"
         try:
-            r = http_session().get(url, timeout=25); r.raise_for_status()
+            r = http_session().get(url, timeout=15); r.raise_for_status()
             pairs = (r.json() or {}).get("pairs", []) or []
         except Exception:
             time.sleep(BUCKET_DELAY_SEC); continue
@@ -201,6 +206,8 @@ def _bucketed_search(chain: str, native_raw: str):
             if not pid or pid in seen: continue
             seen.add(pid); acc.append(p)
         time.sleep(BUCKET_DELAY_SEC)
+        if BUCKET_SEARCH_TARGET > 0 and len(acc) >= BUCKET_SEARCH_TARGET:
+            break
     return acc
 
 def ds_search_native_pairs(chain: str):
@@ -303,7 +310,8 @@ def ds_search_native_pairs(chain: str):
 def dump_candidate(rec: dict):
     if not SAVE_CANDIDATES: return
     out = dict(rec); out["ts"] = now_utc().isoformat()
-    save_jsonl(CANDIDATES_PATH, out)
+    with _CANDIDATE_LOG_LOCK:
+        save_jsonl(CANDIDATES_PATH, out)
 
 # ------------- GECKO (vol5m/vol24h/tx5m) -------------
 def fetch_gecko_for_pool(chain, pool_addr):
@@ -371,18 +379,28 @@ def main():
         total_scanned = 0
         total_cands   = 0
 
-        for chain in CHAINS:
-            try:
-                cands, scanned = ds_search_native_pairs(chain)
-                total_scanned += scanned
-                total_cands   += len(cands)
+        chain_results = []
+        if CHAINS:
+            max_workers = min(len(CHAINS), CHAIN_SCAN_WORKERS)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                future_to_chain = {pool.submit(ds_search_native_pairs, chain): chain for chain in CHAINS}
+                for fut in as_completed(future_to_chain):
+                    chain = future_to_chain[fut]
+                    try:
+                        chain_results.append((chain, *fut.result()))
+                    except Exception as e:
+                        print(f"[{chain}] error:", e)
 
-                # триггеры
-                for meta in cands:
-                    maybe_alert(conn, meta)
+        if len(chain_results) > 1:
+            chain_order = {chain: idx for idx, chain in enumerate(CHAINS)}
+            chain_results.sort(key=lambda item: chain_order.get(item[0], 0))
 
-            except Exception as e:
-                print(f"[{chain}] error:", e)
+        for chain, cands, scanned in chain_results:
+            total_scanned += scanned
+            total_cands   += len(cands)
+
+            for meta in cands:
+                maybe_alert(conn, meta)
 
         elapsed = time.monotonic() - cycle_started
         print(f"[cycle] scanned total: {total_scanned}, candidates total: {total_cands}, took {elapsed:.2f}s")
