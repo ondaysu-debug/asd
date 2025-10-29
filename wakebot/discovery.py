@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 
 from .config import Config
 from .filters import fdv_tx_filters, is_base_token_acceptable, is_token_native_pair, normalize_address
-from .http import HttpClient
+from .net_http import HttpClient
 
 
 DEXES_BY_CHAIN: Dict[str, List[str]] = {

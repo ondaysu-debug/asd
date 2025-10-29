@@ -5,7 +5,7 @@ import time
 from typing import Dict, Tuple
 
 from .config import Config
-from .http import HttpClient
+from .net_http import HttpClient
 
 
 class GeckoCache:
