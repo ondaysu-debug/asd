@@ -32,9 +32,9 @@ def fetch_cmc_ohlcv_25h(
     pool_id: str,
     cache: GeckoCache,
     pool_created_at: str | None = None,
-) -> Tuple[float, float, bool]:
+) -> Tuple[float, float, bool, bool]:
     """
-    Fetch 25 hourly candles and compute (vol1h, prev24h, ok_age).
+    Fetch 25 hourly candles and compute (vol1h, prev24h, ok_age, used_fallback).
     Uses TTL cache provided (reuses GeckoCache type for simplicity).
     """
     key = (f"cmc:{chain}", pool_id)
@@ -42,13 +42,19 @@ def fetch_cmc_ohlcv_25h(
     if cached is not None and isinstance(cached, tuple) and len(cached) == 2:
         # Backward data shape from GeckoCache: (a, b)
         # We tagged with cmc: prefix; if present, treat as (vol1h, prev24h)
-        return float(cached[0]), float(cached[1]), True
+        return float(cached[0]), float(cached[1]), True, False
 
     cmc_chain = (chain or "").strip().lower()
-    url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools/{pool_id}/ohlcv/hour?aggregate=1&limit=25"
+    # Primary endpoint pattern (CMC 'dexer/v3'):
+    #   GET {base}/{chain}/pools/{pool}/ohlcv/hour?aggregate=1&limit=25
+    # Alternative per 2025 docs (v4):
+    #   GET {base}/v4/dex/pairs/ohlcv/latest?pair_address={pool_id}&timeframe=1h&aggregate=1&limit=25
+    # We try v3 first (default base points there), then v4 if candles missing.
+    url_v3 = f"{cfg.cmc_dex_base}/{cmc_chain}/pools/{pool_id}/ohlcv/hour?aggregate=1&limit=25"
+    url_v4 = f"{cfg.cmc_dex_base.rstrip('/')}/v4/dex/pairs/ohlcv/latest?pair_address={pool_id}&timeframe=1h&aggregate=1&limit=25"
 
     try:
-        doc = http.cmc_get_json(url, timeout=20.0) or {}
+        doc = http.cmc_get_json(url_v3, timeout=20.0) or {}
         attrs = ((doc.get("data") or {}).get("attributes") or {}) if isinstance(doc.get("data"), dict) else {}
         # Accept several shapes
         candles = (
@@ -58,15 +64,22 @@ def fetch_cmc_ohlcv_25h(
             or doc.get("candles")
             or []
         )
-        if not isinstance(candles, list) or len(candles) < 2:
-            # fallback if no data
-            if cfg.allow_gt_ohlcv_fallback:
-                from .gecko import fetch_gt_ohlcv_25h as _gt_25h
+        # Try v4 schema if v3 didn't return candles
+        if (not isinstance(candles, list)) or len(candles) < 2:
+            doc_v4 = http.cmc_get_json(url_v4, timeout=20.0) or {}
+            # v4 often nests under data.candles or data.ohlcv_list
+            d4 = doc_v4.get("data") or {}
+            if isinstance(d4, dict):
+                candles = d4.get("candles") or d4.get("ohlcv_list") or []
+            if not isinstance(candles, list) or len(candles) < 2:
+                # fallback if no data
+                if cfg.allow_gt_ohlcv_fallback:
+                    from .gecko import fetch_gt_ohlcv_25h as _gt_25h
 
-                vol1h_f, prev24h_f = _gt_25h(cfg, http, chain, pool_id, cache)
-                cache.set(key, (vol1h_f, prev24h_f))
-                return vol1h_f, prev24h_f, True
-            return 0.0, 0.0, False
+                    vol1h_f, prev24h_f = _gt_25h(cfg, http, chain, pool_id, cache)
+                    cache.set(key, (vol1h_f, prev24h_f))
+                    return vol1h_f, prev24h_f, True, True
+                return 0.0, 0.0, False, False
 
         # Expect candle format [ts, o, h, l, c, v]
         vols: list[float] = []
@@ -82,7 +95,7 @@ def fetch_cmc_ohlcv_25h(
             except Exception:
                 continue
         if not vols:
-            return 0.0, 0.0, False
+            return 0.0, 0.0, False, False
         vol1h = float(vols[-1])
         prev24h = float(sum(vols[-25:-1])) if len(vols) >= 2 else 0.0
 
@@ -101,7 +114,7 @@ def fetch_cmc_ohlcv_25h(
             ok_age = (now_dt - first_dt) >= timedelta(days=int(cfg.revival_min_age_days))
 
         cache.set(key, (vol1h, prev24h))
-        return vol1h, prev24h, ok_age
+        return vol1h, prev24h, ok_age, False
     except Exception:
         if cfg.allow_gt_ohlcv_fallback:
             try:
@@ -109,7 +122,7 @@ def fetch_cmc_ohlcv_25h(
 
                 vol1h_f, prev24h_f = _gt_25h(cfg, http, chain, pool_id, cache)
                 cache.set(key, (vol1h_f, prev24h_f))
-                return vol1h_f, prev24h_f, True
+                return vol1h_f, prev24h_f, True, True
             except Exception:
                 pass
-        return 0.0, 0.0, False
+        return 0.0, 0.0, False, False

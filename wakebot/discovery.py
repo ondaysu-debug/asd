@@ -220,12 +220,13 @@ def gt_discover_by_source(
 
 # ---------------- CMC DEX discovery ----------------
 
-def _normalize_cmc_chain(chain: str) -> str:
-    # CMC DEX uses canonical names: 'ethereum','bsc','solana','base'
+def _normalize_cmc_chain(cfg: Config, chain: str) -> str:
+    """Map internal chain name to CMC slug via cfg.chain_slugs."""
     s = (chain or "").strip().lower()
-    if s in {"ethereum", "bsc", "solana", "base"}:
+    try:
+        return (cfg.chain_slugs or {}).get(s, s)
+    except Exception:
         return s
-    return s
 
 
 def _cmc_pool_url_hint(pool_id: str) -> str:
@@ -299,7 +300,7 @@ def cmc_discover_by_source(
     start_page: int,
     page_limit: int,
 ) -> tuple[list[dict], dict[str, int]]:
-    cmc_chain = _normalize_cmc_chain(chain)
+    cmc_chain = _normalize_cmc_chain(cfg, chain)
     s = (source or "").strip().lower()
     out: list[dict] = []
     scanned_pairs = 0

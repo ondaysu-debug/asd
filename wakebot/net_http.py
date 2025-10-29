@@ -134,10 +134,19 @@ class HttpClient:
                         time.sleep(min(sleep_s, cap))
                 # count penalty for dynamic budget
                 self.add_penalty(1)
+            # Basic access log (no secrets in URL)
+            try:
+                clen = int(r.headers.get("Content-Length")) if r.headers.get("Content-Length") else len(r.content or b"")
+            except Exception:
+                clen = len(r.content or b"")
+            self._log(f"[gt] GET {url} -> {status} bytes={clen}")
             r.raise_for_status()
             try:
                 return r.json() or {}
-            except Exception:
+            except Exception as e:
+                # log truncated body on JSON errors
+                body = (r.text or "")[:200]
+                self._log(f"[gt] JSON parse error: {e} body[:200]={body!r}")
                 return {}
         finally:
             self._limiter.release()
@@ -187,10 +196,18 @@ class HttpClient:
                     r = session.get(alt_url, timeout=timeout)
                     status = r.status_code
                     self._cmc_limiter.record_status(status)
+            # Access log
+            try:
+                clen = int(r.headers.get("Content-Length")) if r.headers.get("Content-Length") else len(r.content or b"")
+            except Exception:
+                clen = len(r.content or b"")
+            self._log(f"[cmc] GET {url} -> {status} bytes={clen}")
             r.raise_for_status()
             try:
                 return r.json() or {}
-            except Exception:
+            except Exception as e:
+                body = (r.text or "")[:200]
+                self._log(f"[cmc] JSON parse error: {e} body[:200]={body!r}")
                 return {}
         finally:
             self._cmc_limiter.release()
