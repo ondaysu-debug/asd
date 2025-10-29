@@ -58,6 +58,12 @@ python -m wakebot.main --once
 python -m wakebot.main
 ```
 
+You can also use the package entrypoint directly:
+```bash
+python -m wakebot --once   # single cycle
+python -m wakebot          # continuous
+```
+
 ### Configuration (.env)
 See `.env.example` for all variables. Key ones:
 - **Telegram:** `TG_BOT_TOKEN`, `TG_CHAT_ID`, `TG_PARSE_MODE`
