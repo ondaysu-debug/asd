@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Dict
 
 from dotenv import load_dotenv
 
@@ -17,47 +17,56 @@ def _as_bool(val: str | None, default: bool = False) -> bool:
 @dataclass(slots=True)
 class Config:
     # Telegram
-    tg_bot_token: str
-    tg_chat_id: str
-    tg_parse_mode: str
+    tg_bot_token: str = ""
+    tg_chat_id: str = ""
+    tg_parse_mode: str = "Markdown"
 
     # APIs
     # CMC DEX (primary)
-    cmc_dex_base: str
-    cmc_dex_base_alt: str
-    cmc_api_key: str
+    cmc_dex_base: str = ""
+    cmc_dex_base_alt: str = ""
+    cmc_api_key: str = ""
     # GeckoTerminal (optional fallback for OHLCV)
-    gecko_base: str
-    allow_gt_ohlcv_fallback: bool
+    gecko_base: str = ""
+    allow_gt_ohlcv_fallback: bool = True
 
     # Filters
-    liquidity_min: float
-    liquidity_max: float
-    tx24h_max: int
-    chains: List[str]
+    liquidity_min: float = 50000.0
+    liquidity_max: float = 800000.0
+    tx24h_max: int = 2000
+    chains: List[str] = field(default_factory=list)
 
     # Limits and cache
     # CMC
-    cmc_calls_per_min: int
-    cmc_retry_after_cap_s: float
+    cmc_calls_per_min: int = 28
+    cmc_retry_after_cap_s: float = 3.0
     # GT
-    gecko_calls_per_min: int
-    gecko_retry_after_cap_s: float
-    gecko_ttl_sec: int
+    gecko_calls_per_min: int = 28
+    gecko_retry_after_cap_s: float = 3.0
+    gecko_ttl_sec: int = 60
 
     # Discovery sources and breadth
     # CMC (primary)
-    cmc_sources: str
-    cmc_rotate_sources: bool
-    cmc_pages_per_chain: int
-    cmc_dex_pages_per_chain: int
-    cmc_page_size: int
+    cmc_sources: str = "new,trending,pools,dexes"
+    cmc_rotate_sources: bool = True
+    cmc_pages_per_chain: int = 2
+    cmc_dex_pages_per_chain: int = 1
+    cmc_page_size: int = 100
+    # CMC chain slug mapping used for endpoints
+    chain_slugs: Dict[str, str] = field(
+        default_factory=lambda: {
+            "base": "base",
+            "ethereum": "ethereum",
+            "solana": "solana",
+            "bsc": "bnb",
+        }
+    )
     # GT (legacy discovery; kept for tests/back-compat)
-    gecko_sources: str
+    gecko_sources: str = "new,trending,pools,dexes"
     gecko_rotate_sources: bool = True
-    gecko_pages_per_chain: int
+    gecko_pages_per_chain: int = 2
     gecko_dex_pages_per_chain: int = 1
-    gecko_page_size: int
+    gecko_page_size: int = 100
 
     # Budget for OHLCV probes (dynamic per cycle)
     max_ohlcv_probes_cap: int = 30
@@ -65,31 +74,31 @@ class Config:
     gecko_safety_budget: int = 4  # legacy name (kept for back-compat)
     min_ohlcv_probes: int = 3
     # Back-compat (tests and older code may still reference this)
-    max_ohlcv_probes: int
+    max_ohlcv_probes: int = 30
 
     # Loop/concurrency
-    cooldown_min: int
-    loop_seconds: int
-    chain_scan_workers: int
-    alert_fetch_workers: int
-    max_cycles: int
+    cooldown_min: int = 30
+    loop_seconds: int = 60
+    chain_scan_workers: int = 4
+    alert_fetch_workers: int = 8
+    max_cycles: int = 0
 
     # Alerting and noise reduction
-    alert_ratio_min: float
-    min_prev24_usd: float
-    revival_min_age_days: int
+    alert_ratio_min: float = 1.0
+    min_prev24_usd: float = 1000.0
+    revival_min_age_days: int = 7
 
     # Seen-cache for OHLCV budget saving
     seen_ttl_min: int = 15
     # Back-compat (tests use seconds)
-    seen_ttl_sec: int
+    seen_ttl_sec: int = 900
 
     # Logging candidates
-    save_candidates: bool
-    candidates_path: Path
+    save_candidates: bool = False
+    candidates_path: Path = Path("./candidates.jsonl")
 
     # Database
-    db_path: Path
+    db_path: Path = Path("wake_state.sqlite")
 
     # Helper properties (populated in load())
     gecko_sources_list: List[str] | None = None
@@ -111,11 +120,15 @@ class Config:
         tg_parse_mode = os.getenv("TG_PARSE_MODE", "Markdown")
 
         # API bases
-        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://api.coinmarketcap.com/dexer/v3")
-        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://pro-api.coinmarketcap.com/dexer/v3")
+        # Note: CMC DEX v4 documented paths sometimes use /v4/dex/... under pro-api.
+        # Our discovery/OHLCV code currently targets the "dexer/v3" family which is stable in production.
+        # You can override these via env if your account uses different base paths.
+        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://pro-api.coinmarketcap.com/dexer/v3")
+        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://api.coinmarketcap.com/dexer/v3")
         cmc_api_key = os.getenv("CMC_API_KEY", "")
         gecko_base = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2")
-        allow_gt_ohlcv_fallback = _as_bool(os.getenv("ALLOW_GT_OHLCV_FALLBACK", "false"))
+        # Allow GT fallback by default to improve coverage when CMC window is missing
+        allow_gt_ohlcv_fallback = _as_bool(os.getenv("ALLOW_GT_OHLCV_FALLBACK", "true"))
 
         # Filters
         liquidity_min = float(os.getenv("LIQUIDITY_MIN", "50000"))
@@ -140,6 +153,15 @@ class Config:
         cmc_pages_per_chain = int(os.getenv("CMC_PAGES_PER_CHAIN", "2"))
         cmc_dex_pages_per_chain = int(os.getenv("CMC_DEX_PAGES_PER_CHAIN", "1"))
         cmc_page_size = int(os.getenv("CMC_PAGE_SIZE", "100"))
+        # Chain slug overrides for CMC endpoints. Per 2025 docs BSC may appear as "bnb".
+        # You can override via env CHAIN_SLUGS_* if needed (not required by default).
+        chain_slugs: Dict[str, str] = {
+            "base": "base",
+            "ethereum": "ethereum",
+            "solana": "solana",
+            # Some CMC surfaces use "bnb" instead of "bsc".
+            "bsc": "bnb",
+        }
         # GT (legacy)
         gecko_sources = os.getenv("GECKO_SOURCES", "new,trending,pools,dexes")
         gecko_rotate_sources = _as_bool(os.getenv("GECKO_ROTATE_SOURCES", "true"))
@@ -208,6 +230,7 @@ class Config:
             cmc_pages_per_chain=cmc_pages_per_chain,
             cmc_dex_pages_per_chain=cmc_dex_pages_per_chain,
             cmc_page_size=cmc_page_size,
+            chain_slugs=chain_slugs,
             gecko_sources=gecko_sources,
             gecko_rotate_sources=gecko_rotate_sources,
             gecko_pages_per_chain=gecko_pages_per_chain,

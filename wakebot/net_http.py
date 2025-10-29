@@ -134,6 +134,11 @@ class HttpClient:
                         time.sleep(min(sleep_s, cap))
                 # count penalty for dynamic budget
                 self.add_penalty(1)
+            # brief success/error log (avoid logging secrets; only URL and sizes)
+            try:
+                self._log(f"[gt] GET {url} -> {status} bytes={len(r.content)}")
+            except Exception:
+                pass
             r.raise_for_status()
             try:
                 return r.json() or {}
@@ -187,6 +192,11 @@ class HttpClient:
                     r = session.get(alt_url, timeout=timeout)
                     status = r.status_code
                     self._cmc_limiter.record_status(status)
+            # brief success/error log (avoid logging secrets; only URL and sizes)
+            try:
+                self._log(f"[cmc] GET {url} -> {status} bytes={len(r.content)}")
+            except Exception:
+                pass
             r.raise_for_status()
             try:
                 return r.json() or {}

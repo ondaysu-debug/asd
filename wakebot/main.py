@@ -132,7 +132,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
                             if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cfg.cooldown_min):
                                 return {"probed": True, "probed_ok": True, "alert": False, "chain": inp.chain}
 
-                    vol1h, prev24h, ok_age = fetch_cmc_ohlcv_25h(cfg, http, inp.chain, inp.pool, cache, inp.pool_created_at)
+                    vol1h, prev24h, ok_age, source_tag = fetch_cmc_ohlcv_25h(cfg, http, inp.chain, inp.pool, cache, inp.pool_created_at)
                     # Mark seen regardless of alert outcome
                     with storage.get_conn() as conn:
                         storage.mark_as_seen(conn, inp.chain, inp.pool)
@@ -141,7 +141,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
                         return {"probed": True, "probed_ok": True, "alert": False, "chain": inp.chain}
 
                     # Send alert and set cooldown
-                    text = build_revival_text_cmc(inp, inp.chain.capitalize(), vol1h, prev24h)
+                    text = build_revival_text_cmc(inp, inp.chain.capitalize(), vol1h, prev24h, source_tag)
                     notifier.send(text)
                     with storage.get_conn() as conn:
                         storage.set_last_alert_ts(conn, inp.pool, int(datetime.now(timezone.utc).timestamp()))
