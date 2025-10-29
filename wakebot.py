@@ -52,7 +52,21 @@ BUCKET_SEARCH_TARGET     = int(os.getenv("BUCKET_SEARCH_TARGET","0"))
 BUCKET_SEARCH_WORKERS    = max(1, int(os.getenv("BUCKET_SEARCH_WORKERS", "32")))
 BUCKET_RETRY_LIMIT       = max(0, int(os.getenv("BUCKET_RETRY_LIMIT", "2")))
 
-GECKO_TTL_SEC = int(os.getenv("GECKO_TTL_SEC", "60"))
+GECKO_TTL_SEC = int(os.getenv("GECKO_TTL_SEC", "30"))
+
+# Dexscreener throttling/adaptivity
+DS_CALLS_PER_SEC_BASE = float(os.getenv("DS_CALLS_PER_SEC", "8"))
+DS_CALLS_PER_SEC_MIN  = float(os.getenv("DS_CALLS_PER_SEC_MIN", "1"))
+DS_MAX_CONCURRENCY    = max(1, int(os.getenv("DS_MAX_CONCURRENCY", "8")))
+DS_ADAPTIVE_WINDOW    = max(10, int(os.getenv("DS_ADAPTIVE_WINDOW", "100")))
+DS_BACKOFF_THRESHOLD  = float(os.getenv("DS_BACKOFF_THRESHOLD", "0.3"))
+DS_RECOVER_THRESHOLD  = float(os.getenv("DS_RECOVER_THRESHOLD", "0.1"))
+DS_DECREASE_STEP      = float(os.getenv("DS_DECREASE_STEP", "0.25"))   # reduce by 25%
+DS_INCREASE_STEP      = float(os.getenv("DS_INCREASE_STEP", "0.10"))   # increase by 10%
+DS_RETRY_AFTER_CAP_S  = float(os.getenv("DS_RETRY_AFTER_CAP_S", "3"))
+
+# Telegram formatting
+TG_PARSE_MODE = os.getenv("TG_PARSE_MODE", "Markdown")
 
 # какие DEX-ы сканировать
 DEXES_BY_CHAIN = {
@@ -91,6 +105,7 @@ NATIVE_SYMBOLS = {
 # ------------- HTTP SESSION -------------
 _SESSION_LOCAL = threading.local()
 _GECKO_CACHE: dict = {}
+_GECKO_CACHE_LOCK = threading.Lock()
 
 def _build_session():
     session = requests.Session()
@@ -115,6 +130,111 @@ def http_session():
         _SESSION_LOCAL.session = session
     return session
 
+# ------------- DEXSCREENER THROTTLER -------------
+_DS_STATE_LOCK = threading.Lock()
+_DS_SEMAPHORE = threading.BoundedSemaphore(DS_MAX_CONCURRENCY)
+_DS_EFFECTIVE_RATE = DS_CALLS_PER_SEC_BASE  # tokens per second
+_DS_TOKENS = _DS_EFFECTIVE_RATE
+_DS_LAST_REFILL = time.monotonic()
+_DS_429_WINDOW = deque(maxlen=DS_ADAPTIVE_WINDOW)
+_DS_LAST_ADJUST_TS = 0.0
+
+def _ds_refill_tokens(now: float) -> None:
+    global _DS_TOKENS, _DS_LAST_REFILL
+    elapsed = max(0.0, now - _DS_LAST_REFILL)
+    if elapsed <= 0:
+        return
+    # Refill based on current rate, cap to current capacity
+    _DS_TOKENS = min(_DS_TOKENS + elapsed * _DS_EFFECTIVE_RATE, _DS_EFFECTIVE_RATE)
+    _DS_LAST_REFILL = now
+
+def _ds_acquire_token_blocking():
+    """Acquire one token from the global DS token bucket, blocking if needed."""
+    while True:
+        with _DS_STATE_LOCK:
+            now = time.monotonic()
+            _ds_refill_tokens(now)
+            if _DS_TOKENS >= 1.0:
+                # consume and proceed
+                _DS_TOKENS -= 1.0
+                return
+            # compute required sleep to get 1 token
+            # avoid division by zero
+            rate = max(DS_CALLS_PER_SEC_MIN, _DS_EFFECTIVE_RATE)
+            needed = 1.0 - _DS_TOKENS
+            sleep_for = needed / max(rate, 1e-6)
+        time.sleep(min(max(sleep_for, 0.005), 0.5))
+
+def _ds_record_status(status_code) -> None:
+    is_429 = int(status_code == 429)
+    with _DS_STATE_LOCK:
+        _DS_429_WINDOW.append(is_429)
+
+def _ds_maybe_adjust_rate() -> None:
+    global _DS_EFFECTIVE_RATE, _DS_TOKENS, _DS_LAST_ADJUST_TS
+    now = time.monotonic()
+    with _DS_STATE_LOCK:
+        if not _DS_429_WINDOW:
+            return
+        if now - _DS_LAST_ADJUST_TS < 1.5:
+            return
+        p429 = sum(_DS_429_WINDOW) / float(len(_DS_429_WINDOW))
+        new_rate = _DS_EFFECTIVE_RATE
+        if p429 > DS_BACKOFF_THRESHOLD:
+            new_rate = max(DS_CALLS_PER_SEC_MIN, _DS_EFFECTIVE_RATE * (1.0 - DS_DECREASE_STEP))
+            if new_rate < _DS_EFFECTIVE_RATE:
+                print(f"[ds] high 429 rate {p429:.0%} → decrease RPS {(_DS_EFFECTIVE_RATE):.2f}→{new_rate:.2f}")
+        elif p429 <= DS_RECOVER_THRESHOLD and _DS_EFFECTIVE_RATE < DS_CALLS_PER_SEC_BASE:
+            new_rate = min(DS_CALLS_PER_SEC_BASE, _DS_EFFECTIVE_RATE * (1.0 + DS_INCREASE_STEP))
+            if new_rate > _DS_EFFECTIVE_RATE:
+                print(f"[ds] normalized {p429:.0%} 429 → increase RPS {(_DS_EFFECTIVE_RATE):.2f}→{new_rate:.2f}")
+        if new_rate != _DS_EFFECTIVE_RATE:
+            _DS_EFFECTIVE_RATE = new_rate
+            # clamp tokens to capacity
+            _DS_TOKENS = min(_DS_TOKENS, _DS_EFFECTIVE_RATE)
+            _DS_LAST_ADJUST_TS = now
+
+def _parse_retry_after_seconds(value) -> float:
+    if not value:
+        return 0.0
+    try:
+        # integer seconds
+        return float(int(value))
+    except Exception:
+        try:
+            # HTTP-date
+            from email.utils import parsedate_to_datetime
+            dt = parsedate_to_datetime(value)
+            if not dt:
+                return 0.0
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (dt - datetime.now(tz=timezone.utc)).total_seconds())
+        except Exception:
+            return 0.0
+
+def ds_get_json(url: str, timeout: float = 30.0):
+    """Centralized Dexscreener GET with global RPS+concurrency limits and 429 adaptivity."""
+    _DS_SEMAPHORE.acquire()
+    try:
+        _ds_acquire_token_blocking()
+        r = http_session().get(url, timeout=timeout)
+        if r.status_code == 429:
+            _ds_record_status(429)
+            wait_s = min(_parse_retry_after_seconds(r.headers.get("Retry-After")), DS_RETRY_AFTER_CAP_S)
+            if wait_s > 0:
+                time.sleep(wait_s)
+        else:
+            _ds_record_status(r.status_code)
+        r.raise_for_status()
+        try:
+            return r.json()
+        except Exception:
+            return None
+    finally:
+        _ds_maybe_adjust_rate()
+        _DS_SEMAPHORE.release()
+
 # ------------- UTILS -------------
 def now_utc(): return datetime.now(timezone.utc)
 
@@ -135,7 +255,12 @@ def tg_send(text):
     try:
         http_session().post(
             f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT_ID, "text": text, "disable_web_page_preview": True},
+            json={
+                "chat_id": TG_CHAT_ID,
+                "text": text,
+                "disable_web_page_preview": True,
+                "parse_mode": TG_PARSE_MODE,
+            },
             timeout=12
         )
     except Exception as e:
@@ -204,9 +329,8 @@ def _make_buckets():
 def _fetch_pairs_by_dex(chain: str, dex_id: str):
     url = f"{DEXSCREENER_BASE}/pairs/{chain}/{dex_id}"
     try:
-        r = http_session().get(url, timeout=30)
-        r.raise_for_status()
-        pairs = (r.json() or {}).get("pairs", []) or []
+        data = ds_get_json(url, timeout=30)
+        pairs = (data or {}).get("pairs", []) or []
         if not pairs:
             time.sleep(random.uniform(0.05, 0.15))
         return pairs
@@ -227,9 +351,8 @@ def _bucketed_search(chain: str, native_raw: str):
             time.sleep(random.uniform(0.5, 1.5) * BUCKET_DELAY_SEC)
         url = f"{DEXSCREENER_BASE}/search?q={native_raw}%20{bucket}"
         try:
-            r = http_session().get(url, timeout=15)
-            r.raise_for_status()
-            return (r.json() or {}).get("pairs", []) or []
+            data = ds_get_json(url, timeout=15)
+            return (data or {}).get("pairs", []) or []
         except Exception:
             return None
 
@@ -400,7 +523,8 @@ def dump_candidate(rec: dict):
 def fetch_gecko_for_pool(chain, pool_addr):
     key = (chain, pool_addr)
     now_ts = time.time()
-    cached = _GECKO_CACHE.get(key)
+    with _GECKO_CACHE_LOCK:
+        cached = _GECKO_CACHE.get(key)
     if cached and now_ts - cached[0] < GECKO_TTL_SEC:
         return cached[1]
 
@@ -428,7 +552,8 @@ def fetch_gecko_for_pool(chain, pool_addr):
     except Exception:
         data = (0.0, 0, 0.0)
 
-    _GECKO_CACHE[key] = (now_ts, data)
+    with _GECKO_CACHE_LOCK:
+        _GECKO_CACHE[key] = (now_ts, data)
     return data
 
 
