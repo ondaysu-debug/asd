@@ -75,15 +75,16 @@ def fetch_ohlcv_49h(cfg: Config, http: HttpClient, chain: str, pool_id: str, cac
         return val
 
 
-def fetch_gt_ohlcv_25h(cfg: Config, http: HttpClient, chain: str, pool_id: str, cache: GeckoCache) -> tuple[float, float]:
+def fetch_gt_ohlcv_25h(cfg: Config, http: HttpClient, chain: str, pool_id: str, cache: GeckoCache) -> tuple[float, float, bool]:
     """
-    Fetch 25 hourly candles from GeckoTerminal and return (vol1h, prev24h).
+    Fetch 25 hourly candles from GeckoTerminal and return (vol1h, prev24h, ok_age).
     Uses the same TTL cache key space but independent from 49h.
     """
     key = (f"gt25:{chain}", pool_id)
     cached = cache.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and isinstance(cached, tuple) and len(cached) >= 2:
+        # Return cached data with age estimation
+        return float(cached[0]), float(cached[1]), True
 
     gt_chain = _normalize_gt_chain(chain)
     url = f"{cfg.gecko_base}/networks/{gt_chain}/pools/{pool_id}/ohlcv/hour?aggregate=1&limit=25"
@@ -93,8 +94,8 @@ def fetch_gt_ohlcv_25h(cfg: Config, http: HttpClient, chain: str, pool_id: str, 
         attrs = ((doc or {}).get("data") or {}).get("attributes") or {}
         candles = attrs.get("ohlcv_list") or attrs.get("candles") or []
         if len(candles) < 2:
-            val = (0.0, 0.0)
-            cache.set(key, val)
+            val = (0.0, 0.0, False)
+            cache.set(key, (0.0, 0.0))
             return val
 
         # candle format: [ts, o, h, l, c, v]
@@ -102,12 +103,22 @@ def fetch_gt_ohlcv_25h(cfg: Config, http: HttpClient, chain: str, pool_id: str, 
         prev_window = candles[-25:-1] if len(candles) >= 25 else candles[:-1]
         prev24 = sum(float(c[-1]) for c in prev_window)
 
-        val = (vol1h, prev24)
-        cache.set(key, val)
+        # Estimate age from first candle timestamp
+        ok_age = False
+        try:
+            first_ts = int(candles[0][0])
+            first_dt = datetime.fromtimestamp(first_ts, tz=timezone.utc)
+            now_dt = datetime.now(timezone.utc)
+            ok_age = (now_dt - first_dt) >= timedelta(days=int(cfg.revival_min_age_days))
+        except Exception:
+            ok_age = False
+
+        val = (vol1h, prev24, ok_age)
+        cache.set(key, (vol1h, prev24))
         return val
     except Exception:
-        val = (0.0, 0.0)
-        cache.set(key, val)
+        val = (0.0, 0.0, False)
+        cache.set(key, (0.0, 0.0))
         return val
 
 

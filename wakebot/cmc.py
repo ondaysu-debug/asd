@@ -44,8 +44,9 @@ def fetch_cmc_ohlcv_25h(
         # We tagged with cmc: prefix; if present, treat as (vol1h, prev24h)
         return float(cached[0]), float(cached[1]), True
 
-    cmc_chain = (chain or "").strip().lower()
-    url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools/{pool_id}/ohlcv/hour?aggregate=1&limit=25"
+    cmc_chain = cfg.chain_slugs.get((chain or "").strip().lower(), chain) if cfg.chain_slugs else chain
+    # Use CMC DEX API v4 OHLCV endpoint
+    url = f"{cfg.cmc_dex_base}/v4/dex/pairs/ohlcv/latest?pair_address={pool_id}&timeframe=1h&aggregate=1&limit=25"
 
     try:
         doc = http.cmc_get_json(url, timeout=20.0) or {}
