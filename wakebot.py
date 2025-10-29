@@ -32,9 +32,9 @@ CHAINS = [c.strip().lower() for c in os.getenv("CHAINS","base,solana,ethereum").
 # цикл/алерты
 COOLDOWN_MIN        = int(os.getenv("COOLDOWN_MIN","30"))
 LOOP_SECONDS        = int(os.getenv("LOOP_SECONDS","60"))
-CHAIN_SCAN_WORKERS  = max(1, int(os.getenv("CHAIN_SCAN_WORKERS", "4")))
+CHAIN_SCAN_WORKERS  = max(1, int(os.getenv("CHAIN_SCAN_WORKERS", "8")))
 MAX_CYCLES          = max(0, int(os.getenv("MAX_CYCLES", "0")))
-ALERT_FETCH_WORKERS = max(1, int(os.getenv("ALERT_FETCH_WORKERS", "8")))
+ALERT_FETCH_WORKERS = max(1, int(os.getenv("ALERT_FETCH_WORKERS", "16")))
 
 # лог кандидатов
 SAVE_CANDIDATES = as_bool(os.getenv("SAVE_CANDIDATES","true"))
@@ -46,23 +46,23 @@ FALLBACK_BUCKETED_SEARCH = as_bool(os.getenv("FALLBACK_BUCKETED_SEARCH","true"))
 BUCKET_ALPHABET          = os.getenv("BUCKET_ALPHABET","abcdefghijklmnopqrstuvwxyz0123456789")
 USE_TWO_CHAR_BUCKETS     = as_bool(os.getenv("USE_TWO_CHAR_BUCKETS","true"))
 MAX_BUCKETS_PER_CHAIN    = int(os.getenv("MAX_BUCKETS_PER_CHAIN","1200"))
-BUCKET_DELAY_SEC         = float(os.getenv("BUCKET_DELAY_SEC","0.01"))
+BUCKET_DELAY_SEC         = float(os.getenv("BUCKET_DELAY_SEC","0.0"))
 MAX_PAIRS_PER_DEX        = int(os.getenv("MAX_PAIRS_PER_DEX","5000"))
-BUCKET_SEARCH_TARGET     = int(os.getenv("BUCKET_SEARCH_TARGET","0"))
-BUCKET_SEARCH_WORKERS    = max(1, int(os.getenv("BUCKET_SEARCH_WORKERS", "32")))
+BUCKET_SEARCH_TARGET     = int(os.getenv("BUCKET_SEARCH_TARGET","400"))
+BUCKET_SEARCH_WORKERS    = max(1, int(os.getenv("BUCKET_SEARCH_WORKERS", "64")))
 BUCKET_RETRY_LIMIT       = max(0, int(os.getenv("BUCKET_RETRY_LIMIT", "2")))
 
 GECKO_TTL_SEC = int(os.getenv("GECKO_TTL_SEC", "30"))
 
 # Dexscreener throttling/adaptivity
-DS_CALLS_PER_SEC_BASE = float(os.getenv("DS_CALLS_PER_SEC", "8"))
+DS_CALLS_PER_SEC_BASE = float(os.getenv("DS_CALLS_PER_SEC", "20"))
 DS_CALLS_PER_SEC_MIN  = float(os.getenv("DS_CALLS_PER_SEC_MIN", "1"))
-DS_MAX_CONCURRENCY    = max(1, int(os.getenv("DS_MAX_CONCURRENCY", "8")))
-DS_ADAPTIVE_WINDOW    = max(10, int(os.getenv("DS_ADAPTIVE_WINDOW", "100")))
+DS_MAX_CONCURRENCY    = max(1, int(os.getenv("DS_MAX_CONCURRENCY", "32")))
+DS_ADAPTIVE_WINDOW    = max(10, int(os.getenv("DS_ADAPTIVE_WINDOW", "50")))
 DS_BACKOFF_THRESHOLD  = float(os.getenv("DS_BACKOFF_THRESHOLD", "0.3"))
 DS_RECOVER_THRESHOLD  = float(os.getenv("DS_RECOVER_THRESHOLD", "0.1"))
-DS_DECREASE_STEP      = float(os.getenv("DS_DECREASE_STEP", "0.25"))   # reduce by 25%
-DS_INCREASE_STEP      = float(os.getenv("DS_INCREASE_STEP", "0.10"))   # increase by 10%
+DS_DECREASE_STEP      = float(os.getenv("DS_DECREASE_STEP", "0.35"))   # reduce by 35%
+DS_INCREASE_STEP      = float(os.getenv("DS_INCREASE_STEP", "0.25"))   # increase by 25%
 DS_RETRY_AFTER_CAP_S  = float(os.getenv("DS_RETRY_AFTER_CAP_S", "3"))
 
 # Telegram formatting
@@ -111,8 +111,8 @@ def _build_session():
     session = requests.Session()
     session.headers.update({"User-Agent":"wakebot/1.0"})
     adapter = HTTPAdapter(
-        pool_connections=128,
-        pool_maxsize=128,
+        pool_connections=256,
+        pool_maxsize=256,
         max_retries=Retry(
             total=3,
             backoff_factor=0.6,
@@ -416,7 +416,7 @@ def ds_search_native_pairs(chain: str):
     if SCAN_BY_DEX:
         dexes = DEXES_BY_CHAIN.get(chain, [])
         if dexes:
-            max_workers = min(len(dexes), 8)
+            max_workers = min(len(dexes), 16)
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {pool.submit(_fetch_pairs_by_dex, chain, dex_id): dex_id for dex_id in dexes}
                 for fut in as_completed(futures):
