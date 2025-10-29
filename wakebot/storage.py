@@ -27,6 +27,14 @@ class Storage:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seen_pools(
+                  pool TEXT PRIMARY KEY,
+                  last_seen_ts INTEGER
+                )
+                """
+            )
 
     def get_conn(self) -> sqlite3.Connection:
         return sqlite3.connect(str(self._cfg.db_path))
@@ -56,3 +64,32 @@ class Storage:
         with self._jsonl_lock:
             with path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
+
+    # ---------------- Seen cache helpers ----------------
+    def mark_as_seen(self, conn: sqlite3.Connection, pool: str) -> None:
+        conn.execute(
+            """
+            INSERT INTO seen_pools(pool,last_seen_ts) VALUES(?, strftime('%s','now'))
+            ON CONFLICT(pool) DO UPDATE SET last_seen_ts=strftime('%s','now')
+            """,
+            (pool,),
+        )
+        conn.commit()
+
+    def get_recently_seen(self, conn: sqlite3.Connection, ttl_sec: int) -> set[str]:
+        cur = conn.execute(
+            """
+            SELECT pool FROM seen_pools WHERE last_seen_ts > strftime('%s','now') - ?
+            """,
+            (int(ttl_sec),),
+        )
+        return {row[0] for row in cur.fetchall()}
+
+    def purge_seen_older_than(self, conn: sqlite3.Connection, ttl_sec: int) -> None:
+        conn.execute(
+            """
+            DELETE FROM seen_pools WHERE last_seen_ts <= strftime('%s','now') - ?
+            """,
+            (int(ttl_sec),),
+        )
+        conn.commit()

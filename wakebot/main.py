@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from .alerts import AlertInputs, Notifier, maybe_alert
 from .config import Config
-from .discovery import gt_fetch_page
+from .discovery import gt_discover_new_pairs
 from .gecko import GeckoCache, fetch_ohlcv_49h
 from .net_http import HttpClient
 from .storage import Storage
@@ -27,15 +27,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
     total_scanned = 0
     total_cands = 0
 
-    # pick sources for this cycle
-    active_sources = pick_sources(cfg, cycle_idx)
-
-    # compute budgets
-    pages_spent = len(cfg.chains) * cfg.gecko_pages_per_chain * max(1, len(active_sources)) if cfg.gecko_source_mode == "all" else len(cfg.chains) * cfg.gecko_pages_per_chain
-    budget = int(cfg.gecko_calls_per_min * cfg.loop_seconds / 60.0)
-    ohlcv_budget = max(0, min(cfg.max_ohlcv_probes, budget - pages_spent))
-
-    # discovery across chains/sources/pages
+    # discovery across chains using configured sources and pages
     aggregated: list[dict] = []
     if cfg.chains:
         # limit chain scan workers
@@ -43,16 +35,14 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {}
             for chain in cfg.chains:
-                for source in active_sources:
-                    for page in range(1, cfg.gecko_pages_per_chain + 1):
-                        futures[pool.submit(gt_fetch_page, cfg, http, chain, source, page)] = (chain, source, page)
+                futures[pool.submit(gt_discover_new_pairs, cfg, http, chain)] = chain
             for fut in as_completed(futures):
-                chain_name, source, page = futures[fut]
+                chain_name = futures[fut]
                 try:
-                    page_items = fut.result() or []
-                    aggregated.extend(page_items)
+                    items = fut.result() or []
+                    aggregated.extend(items)
                 except Exception as e:
-                    print(f"[{chain_name}] {source} page {page} error: {e}")
+                    print(f"[{chain_name}] discovery error: {e}")
 
     total_cands = len(aggregated)
 
@@ -64,10 +54,15 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
             out["ts"] = now_iso
             storage.append_jsonl(out)
 
-    # sort and select OHLCV candidates by liquidity desc
-    if aggregated:
-        aggregated.sort(key=lambda m: (float(m.get("liquidity", 0.0)), -float(m.get("tx24h", 0))), reverse=True)
-    selected = aggregated[:ohlcv_budget] if ohlcv_budget > 0 else []
+    # seen-cache to avoid wasting OHLCV budget on recently probed pools
+    with storage.get_conn() as conn:
+        seen = storage.get_recently_seen(conn, cfg.seen_ttl_sec)
+    candidates = [m for m in aggregated if m.get("pool") not in seen]
+
+    # sort and cap OHLCV probes by liquidity desc and tx24h asc
+    if candidates:
+        candidates.sort(key=lambda m: (float(m.get("liquidity", 0.0)), -float(m.get("tx24h", 0))), reverse=True)
+    selected = candidates[: cfg.max_ohlcv_probes] if cfg.max_ohlcv_probes > 0 else []
 
     # parallel fetch + alerts
     if selected:
@@ -92,15 +87,16 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
                     pid = futures[fut]
                     print(f"[alert] {pid} error: {e}")
 
+    # purge old seen entries
+    with storage.get_conn() as conn:
+        storage.purge_seen_older_than(conn, cfg.seen_ttl_sec)
+
     print(f"[cycle] scanned total: {total_scanned}, candidates total: {total_cands}")
 
 
 def pick_sources(cfg: Config, cycle_idx: int) -> list[str]:
-    sources = cfg.gecko_sources_list or ["new"]
-    if cfg.gecko_source_mode == "rotate":
-        i = cycle_idx % max(1, len(sources))
-        return [sources[i]]
-    return sources
+    # Deprecated rotation; always use all configured sources per cycle
+    return cfg.gecko_sources_list or ["new"]
 
 
 def main(argv: list[str] | None = None) -> None:
