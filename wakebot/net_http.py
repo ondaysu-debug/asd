@@ -49,6 +49,23 @@ class HttpClient:
             log_fn=self._log,
         )
 
+        # global rate limiter for CMC DEX
+        cmc_base_rps = max(0.0, float(cfg.cmc_calls_per_min) / 60.0)
+        cmc_min_rps = max(0.2, cmc_base_rps * 0.5)
+        self._cmc_limiter = ApiRateLimiter(
+            max_concurrency=10,
+            adaptive=AdaptiveParams(
+                base_rps=cmc_base_rps,
+                min_rps=cmc_min_rps,
+                backoff_threshold=0.30,
+                recover_threshold=0.10,
+                decrease_step=0.25,
+                increase_step=0.10,
+                window=60,
+            ),
+            log_fn=self._log,
+        )
+
     # ----- Per-cycle accounting -----
     def reset_cycle_counters(self) -> None:
         self._cycle_started_at = time.monotonic()
@@ -124,6 +141,59 @@ class HttpClient:
                 return {}
         finally:
             self._limiter.release()
+            # count any finished HTTP request toward the cycle budget
+            try:
+                self._cycle_requests += 1
+            except Exception:
+                self._cycle_requests = int(self._cycle_requests) + 1
+
+    # ----- CMC DEX with throttling and API key -----
+    def cmc_get_json(self, url: str, timeout: float = 20.0) -> dict[str, Any]:
+        # acquire limiter: may need to sleep based on tokens
+        sleep_for = self._cmc_limiter.acquire()
+        if sleep_for > 0:
+            self._log(f"[cmc] throttling sleep {sleep_for:.3f}s @ rate={self._cmc_limiter.get_rate():.2f}")
+            time.sleep(min(sleep_for, 5.0))
+        try:
+            session = self._session()
+            # ensure header on each request
+            if self._cfg.cmc_api_key:
+                session.headers["X-CMC_PRO_API_KEY"] = self._cfg.cmc_api_key
+            r = session.get(url, timeout=timeout)
+            status = r.status_code
+            self._cmc_limiter.record_status(status)
+
+            # Respect Retry-After for 429
+            if status == 429:
+                retry_after_hdr = r.headers.get("Retry-After")
+                if retry_after_hdr:
+                    sleep_s = _parse_retry_after(retry_after_hdr)
+                    if sleep_s is not None and sleep_s > 0:
+                        cap = max(0.0, self._cfg.cmc_retry_after_cap_s)
+                        self._log(f"[cmc] 429 Retry-After {sleep_s:.3f}s (cap {cap:.3f}s)")
+                        time.sleep(min(sleep_s, cap))
+                self.add_penalty(1)
+
+            # If unauthorized/forbidden or persistent 404, try ALT base once
+            if status in (401, 403) or status == 404:
+                try_alt = False
+                base = self._cfg.cmc_dex_base.rstrip("/")
+                alt = self._cfg.cmc_dex_base_alt.rstrip("/")
+                if url.startswith(base) and alt:
+                    try_alt = True
+                if try_alt:
+                    alt_url = url.replace(base, alt, 1)
+                    self._log(f"[cmc] retry via ALT base: {alt_url}")
+                    r = session.get(alt_url, timeout=timeout)
+                    status = r.status_code
+                    self._cmc_limiter.record_status(status)
+            r.raise_for_status()
+            try:
+                return r.json() or {}
+            except Exception:
+                return {}
+        finally:
+            self._cmc_limiter.release()
             # count any finished HTTP request toward the cycle budget
             try:
                 self._cycle_requests += 1

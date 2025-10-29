@@ -75,6 +75,42 @@ def fetch_ohlcv_49h(cfg: Config, http: HttpClient, chain: str, pool_id: str, cac
         return val
 
 
+def fetch_gt_ohlcv_25h(cfg: Config, http: HttpClient, chain: str, pool_id: str, cache: GeckoCache) -> tuple[float, float]:
+    """
+    Fetch 25 hourly candles from GeckoTerminal and return (vol1h, prev24h).
+    Uses the same TTL cache key space but independent from 49h.
+    """
+    key = (f"gt25:{chain}", pool_id)
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+
+    gt_chain = _normalize_gt_chain(chain)
+    url = f"{cfg.gecko_base}/networks/{gt_chain}/pools/{pool_id}/ohlcv/hour?aggregate=1&limit=25"
+
+    try:
+        doc = http.gt_get_json(url, timeout=20.0)
+        attrs = ((doc or {}).get("data") or {}).get("attributes") or {}
+        candles = attrs.get("ohlcv_list") or attrs.get("candles") or []
+        if len(candles) < 2:
+            val = (0.0, 0.0)
+            cache.set(key, val)
+            return val
+
+        # candle format: [ts, o, h, l, c, v]
+        vol1h = float(candles[-1][5])
+        prev_window = candles[-25:-1] if len(candles) >= 25 else candles[:-1]
+        prev24 = sum(float(c[-1]) for c in prev_window)
+
+        val = (vol1h, prev24)
+        cache.set(key, val)
+        return val
+    except Exception:
+        val = (0.0, 0.0)
+        cache.set(key, val)
+        return val
+
+
 # ---------------- Revival window (24h vs previous 7d) ----------------
 
 @dataclass(slots=True)

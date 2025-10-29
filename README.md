@@ -1,21 +1,21 @@
 ## WakeBot - Crypto Token Alert Bot
 
-Reliable TOKEN/native discovery and alerts using the public GeckoTerminal API only (no Pro). Scans Base, Solana, and Ethereum, filters noise, fetches precise OHLCV windows, and sends Telegram notifications for REVIVAL signals: older pools that were quiet last week but woke up in the last 24h.
+Reliable TOKEN/native discovery and alerts using CoinMarketCap DEX API (primary) with optional GeckoTerminal OHLCV fallback. Scans Base, Solana, Ethereum, and BSC, filters noise, fetches precise OHLCV windows, and sends Telegram notifications for REVIVAL signals.
 
 ### Features
-- **Discovery (GeckoTerminal):**
-  - Sources: `new_pools`, `trending_pools`, raw `pools`, and `dexes/{dex}/pools`
-  - Rotation across sources per cycle with `GECKO_ROTATE_SOURCES=true`
+- **Discovery (CMC DEX):**
+  - Sources: `new`, `trending`, raw `pools`, and `dexes/{dex}/pools`
+  - Rotation across sources per cycle with `CMC_ROTATE_SOURCES=true`
   - Normalizes to TOKEN/native pairs (WETH on EVM, SOL on Solana)
 - **Filtering:**
   - Normalize addresses by chain
   - Convert to TOKEN/native (WETH on EVM, SOL on Solana)
   - Exclude majors/mimics by symbol/addresses
   - Filter by liquidity range and `tx24h` max
-- **Metrics (GeckoTerminal OHLCV only):**
-  - Fetch 193 hourly candles per pool for revival (`/ohlcv/hour?limit=193`)
-  - Derive `now_24h` (sum of last 24h) and `prev_week` (sum of 168h before last 24h)
-  - TTL cache for OHLCV results (configurable)
+- **Metrics (CMC DEX OHLCV 25h):**
+  - Fetch 25 hourly candles per pool (`limit=25`)
+  - Derive `vol1h` (last hour) and `prev24h` (24 hours before last)
+  - TTL cache for OHLCV results (configurable); optional GT fallback
 - **Alerts:**
   - REVIVAL rule: age >= `REVIVAL_MIN_AGE_DAYS`, `now_24h` >= min, `prev_week` <= max, and `now_24h / prev_week` >= `REVIVAL_RATIO_MIN` (optional `REVIVAL_USE_LAST_HOURS`)
   - Per-pool cooldown in SQLite
@@ -67,14 +67,18 @@ See `.env.example` for all variables. Key ones and defaults:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `GECKO_BASE` | `https://api.geckoterminal.com/api/v2` | Public GT API base |
-| `GECKO_CALLS_PER_MIN` | `28` | Public budget target (< 30/min) |
-| `GECKO_RETRY_AFTER_CAP_S` | `3.0` | Max sleep for Retry-After |
-| `GECKO_SOURCES` | `new,trending,pools,dexes` | Discovery sources |
-| `GECKO_ROTATE_SOURCES` | `true` | Rotate one source per cycle |
-| `GECKO_PAGES_PER_CHAIN` | `2` | Pages per source per chain |
-| `GECKO_DEX_PAGES_PER_CHAIN` | `1` | Pages per dex per chain |
-| `GECKO_PAGE_SIZE` | `100` | Items per page |
+| `CMC_DEX_BASE` | `https://api.coinmarketcap.com/dexer/v3` | CMC DEX API base |
+| `CMC_DEX_BASE_ALT` | `https://pro-api.coinmarketcap.com/dexer/v3` | Alt base for retry |
+| `CMC_API_KEY` | `` | API key (optional) |
+| `CMC_CALLS_PER_MIN` | `28` | HTTP budget per minute |
+| `CMC_RETRY_AFTER_CAP_S` | `3` | Cap for Retry-After |
+| `CMC_SOURCES` | `new,trending,pools,dexes` | Discovery sources |
+| `CMC_ROTATE_SOURCES` | `true` | Rotate one source per cycle |
+| `CMC_PAGES_PER_CHAIN` | `2` | Pages per source per chain |
+| `CMC_DEX_PAGES_PER_CHAIN` | `1` | Pages per dex per chain |
+| `CMC_PAGE_SIZE` | `100` | Items per page |
+| `ALLOW_GT_OHLCV_FALLBACK` | `false` | Use GT OHLCV if CMC empty |
+| `GECKO_BASE` | `https://api.geckoterminal.com/api/v2` | GT base (fallback only) |
 | `LIQUIDITY_MIN` | `50000` | USD |
 | `LIQUIDITY_MAX` | `800000` | USD |
 | `TX24H_MAX` | `2000` | Buys + sells in 24h |
@@ -89,39 +93,52 @@ See `.env.example` for all variables. Key ones and defaults:
 | `CHAIN_SCAN_WORKERS` | `4` | Parallel chains for discovery |
 | `ALERT_FETCH_WORKERS` | `8` | Parallel alert checks/sends |
 | `TG_PARSE_MODE` | `Markdown` | Telegram parse mode |
-| `CHAINS` | `base,solana,ethereum` | Supported: `ethereum→eth`, `base`, `solana` |
+| `CHAINS` | `base,solana,ethereum,bsc` | Supported: `ethereum`, `base`, `solana`, `bsc` |
 
-Typical per-loop budget: pages * sources + OHLCV probes (keep under `GECKO_CALLS_PER_MIN`).
+Typical per-loop budget: planned pages + OHLCV probes (keep under `CMC_CALLS_PER_MIN`).
 
 Example `.env` snippet:
 
 ```bash
+# --- CMC DEX API ---
+CMC_DEX_BASE=https://api.coinmarketcap.com/dexer/v3
+CMC_DEX_BASE_ALT=https://pro-api.coinmarketcap.com/dexer/v3
+CMC_API_KEY=
+
+# limits and cache
+CMC_CALLS_PER_MIN=28
+CMC_RETRY_AFTER_CAP_S=3
 GECKO_BASE=https://api.geckoterminal.com/api/v2
-GECKO_CALLS_PER_MIN=28
-GECKO_RETRY_AFTER_CAP_S=3.0
-GECKO_SOURCES=new,trending,pools,dexes
-GECKO_ROTATE_SOURCES=true
-GECKO_PAGES_PER_CHAIN=2
-GECKO_DEX_PAGES_PER_CHAIN=1
-GECKO_PAGE_SIZE=100
+GECKO_TTL_SEC=60
+
+# discovery sources
+CMC_SOURCES=new,trending,pools,dexes
+CMC_ROTATE_SOURCES=true
+CMC_PAGE_SIZE=100
+CMC_PAGES_PER_CHAIN=2
+CMC_DEX_PAGES_PER_CHAIN=1
+
+# budgets/limiter
+MAX_OHLCV_PROBES_CAP=30
+MIN_OHLCV_PROBES=3
+CMC_SAFETY_BUDGET=4
+
+# pre-check filters
 LIQUIDITY_MIN=50000
 LIQUIDITY_MAX=800000
 TX24H_MAX=2000
-CHAINS=base,solana,ethereum
-GECKO_TTL_SEC=60
-MAX_OHLCV_PROBES_CAP=30
-GECKO_SAFETY_BUDGET=4
-MIN_OHLCV_PROBES=3
+
+# revival / alerts
+REVIVAL_MIN_AGE_DAYS=7
+MIN_PREV24_USD=1000
 ALERT_RATIO_MIN=1.0
 SEEN_TTL_MIN=15
-COOLDOWN_MIN=30
-LOOP_SECONDS=60
-CHAIN_SCAN_WORKERS=4
-ALERT_FETCH_WORKERS=8
-MAX_CYCLES=0
-SAVE_CANDIDATES=true
-CANDIDATES_PATH=./candidates.jsonl
-DB_PATH=wake_state.sqlite
+
+# chains
+CHAINS=base,solana,ethereum,bsc
+
+# optional GT OHLCV fallback
+ALLOW_GT_OHLCV_FALLBACK=false
 ```
 
 ### Tests
@@ -138,6 +155,6 @@ Coverage includes:
 - Gecko TTL cache (no HTTP until TTL expiry)
 
 ### Notes
-- Public GeckoTerminal only; no DexScreener or CoinGecko On-Chain
+- Primary data source: CoinMarketCap DEX API; optional GeckoTerminal OHLCV fallback
 - Works on Windows, macOS, Linux; no POSIX-only dependencies
 - No Docker/Poetry required (optional to add later)
