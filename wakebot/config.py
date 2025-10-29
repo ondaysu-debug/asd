@@ -80,6 +80,8 @@ class Config:
     alert_ratio_min: float = 1.0
     min_prev24_usd: float = 1000.0
     revival_min_age_days: int = 7
+    # Data-quality discrepancy warn threshold (relative, e.g. 0.25 = 25%)
+    dq_warn_threshold: float = 0.25
 
     # Seen-cache for OHLCV budget saving
     seen_ttl_min: int = 15
@@ -198,6 +200,7 @@ class Config:
         revival_now_24h_min_usd = float(os.getenv("REVIVAL_NOW_24H_MIN_USD", "1500"))
         revival_ratio_min = float(os.getenv("REVIVAL_RATIO_MIN", "2.0"))
         revival_use_last_hours = int(os.getenv("REVIVAL_USE_LAST_HOURS", "0"))
+        dq_warn_threshold = float(os.getenv("DQ_WARN_THRESHOLD", "0.25"))
 
         cfg = Config(
             tg_bot_token=tg_bot_token,
@@ -240,6 +243,7 @@ class Config:
             alert_ratio_min=alert_ratio_min,
             min_prev24_usd=min_prev24_usd,
             revival_min_age_days=revival_min_age_days,
+            dq_warn_threshold=dq_warn_threshold,
             seen_ttl_min=seen_ttl_min,
             seen_ttl_sec=seen_ttl_sec,
             save_candidates=save_candidates,

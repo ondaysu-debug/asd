@@ -1,11 +1,32 @@
 from __future__ import annotations
 
 from typing import Tuple
+import random
 from datetime import datetime, timedelta, timezone
 
 from .config import Config
 from .net_http import HttpClient
 from .gecko import GeckoCache
+def _validate_cmc_ohlcv_doc(doc: dict) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    data = doc.get("data")
+    if not data:
+        return False
+    attrs = (data.get("attributes") or {}) if isinstance(data, dict) else {}
+    candles = attrs.get("candles") or attrs.get("ohlcv_list")
+    # Be permissive with alternate schema (v4): data.candles/ohlcv_list
+    if not isinstance(candles, list):
+        if isinstance(data, dict):
+            alt = data.get("candles") or data.get("ohlcv_list")
+            candles = alt
+    if not isinstance(candles, list):
+        return False
+    for c in candles:
+        if not (isinstance(c, list) and len(c) >= 6):
+            return False
+    return True
+
 
 
 def _parse_ts(ts_val) -> datetime | None:
@@ -55,6 +76,8 @@ def fetch_cmc_ohlcv_25h(
 
     try:
         doc = http.cmc_get_json(url_v3, timeout=20.0) or {}
+        if not _validate_cmc_ohlcv_doc(doc):
+            print(f"[cmc][validate] unexpected ohlcv schema for pair={pool_id}; fallback? {cfg.allow_gt_ohlcv_fallback}")
         attrs = ((doc.get("data") or {}).get("attributes") or {}) if isinstance(doc.get("data"), dict) else {}
         # Accept several shapes
         candles = (
@@ -67,6 +90,8 @@ def fetch_cmc_ohlcv_25h(
         # Try v4 schema if v3 didn't return candles
         if (not isinstance(candles, list)) or len(candles) < 2:
             doc_v4 = http.cmc_get_json(url_v4, timeout=20.0) or {}
+            if not _validate_cmc_ohlcv_doc(doc_v4):
+                print(f"[cmc][validate] unexpected ohlcv schema for pair={pool_id}; fallback? {cfg.allow_gt_ohlcv_fallback}")
             # v4 often nests under data.candles or data.ohlcv_list
             d4 = doc_v4.get("data") or {}
             if isinstance(d4, dict):
@@ -113,6 +138,24 @@ def fetch_cmc_ohlcv_25h(
         if not ok_age and first_dt is not None:
             ok_age = (now_dt - first_dt) >= timedelta(days=int(cfg.revival_min_age_days))
 
+        # Data-quality sampling: compare with GT for ~5% if allowed
+        if cfg.allow_gt_ohlcv_fallback and random.random() < 0.05:
+            try:
+                from .gecko import fetch_gt_ohlcv_25h as _gt_25h
+
+                vol1h_gt, prev24h_gt = _gt_25h(cfg, http, chain, pool_id, cache)
+                dv1 = abs(vol1h - vol1h_gt)
+                dv1_rel = dv1 / max(1.0, vol1h)
+                dprev = abs(prev24h - prev24h_gt)
+                dprev_rel = dprev / max(1.0, prev24h)
+                print(
+                    f"[dq] {chain}/{pool_id} v1h CMC={vol1h:.2f} GT={vol1h_gt:.2f} Δ={dv1:.2f} ({dv1_rel:.1%}); "
+                    f"prev24 CMC={prev24h:.2f} GT={prev24h_gt:.2f} Δ={dprev:.2f} ({dprev_rel:.1%})"
+                )
+                if dv1_rel > float(getattr(cfg, 'dq_warn_threshold', 0.25)) or dprev_rel > float(getattr(cfg, 'dq_warn_threshold', 0.25)):
+                    print(f"[dq][warn] discrepancy >{int(float(getattr(cfg, 'dq_warn_threshold', 0.25))*100)}% for {chain}/{pool_id}")
+            except Exception:
+                pass
         cache.set(key, (vol1h, prev24h))
         return vol1h, prev24h, ok_age, False
     except Exception:

@@ -38,6 +38,8 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
     # discovery across chains using configured CMC sources and progress cursors
     aggregated: list[dict] = []
     per_chain_stats: dict[str, dict] = {}
+    had_errors = False
+    first_error_reason = None
     if cfg.chains:
         # limit chain scan workers
         max_workers = min(len(cfg.chains), cfg.chain_scan_workers)
@@ -54,6 +56,9 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
                     total_scanned += int((stats or {}).get("scanned_pairs", 0))
                 except Exception as e:
                     print(f"[{chain_name}] discovery error: {e}")
+                    had_errors = True
+                    if first_error_reason is None:
+                        first_error_reason = f"discovery:{chain_name}:{e}"
 
     # log candidates in JSONL if enabled
     if aggregated and cfg.save_candidates:
@@ -112,6 +117,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
             probed_total = 0
             probed_ok = 0
             alerts_by_chain: dict[str, int] = {}
+            alert_errors: list[str] = []
             for meta in selected:
                 inputs = AlertInputs(
                     chain=meta["chain"],
@@ -162,6 +168,10 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
                 except Exception as e:
                     pid = futures[fut]
                     print(f"[alert] {pid} error: {e}")
+                    had_errors = True
+                    if first_error_reason is None:
+                        first_error_reason = f"alert:{pid}:{e}"
+                    alert_errors.append(str(e))
     else:
         probed_total = 0
         probed_ok = 0
@@ -182,6 +192,25 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
     # overall summary
     used = len(selected)
     print(f"[cycle] total scanned: {total_scanned} pools; OHLCV used: {used}/{ohlcv_budget}")
+    # Rate-limit metrics
+    print(
+        f"[rate] req={http.get_cycle_requests()} 429={http.get_cycle_429()} penalty={http.get_cycle_penalty():.2f}s rps≈{http.get_effective_rps():.2f}"
+    )
+
+    # health-like summary line
+    pages_planned_total = sum(int((per_chain_stats.get(ch, {}) or {}).get("pages_planned", 0)) for ch in (cfg.chains or []))
+    pages_done_total = sum(int((per_chain_stats.get(ch, {}) or {}).get("pages_done", 0)) for ch in (cfg.chains or []))
+    validation_issues_total = sum(int((per_chain_stats.get(ch, {}) or {}).get("validation_issues", 0)) for ch in (cfg.chains or []))
+    ok = (not had_errors) and (validation_issues_total == 0)
+    reason = first_error_reason or ("schema" if validation_issues_total > 0 else "")
+    if ok:
+        print(
+            f"[health] ok=true discovery_pages={pages_done_total}/{pages_planned_total} scanned={total_scanned} ohlcv_used={used}/{ohlcv_budget}"
+        )
+    else:
+        print(
+            f"[health] ok=false reason={reason} discovery_pages={pages_done_total}/{pages_planned_total} scanned={total_scanned} ohlcv_used={used}/{ohlcv_budget}"
+        )
 
 
 def pick_sources(cfg: Config, cycle_idx: int) -> list[str]:
@@ -192,9 +221,18 @@ def pick_sources(cfg: Config, cycle_idx: int) -> list[str]:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="run single cycle and exit")
+    parser.add_argument("--health", action="store_true", help="run health-check against CMC API and exit")
     args = parser.parse_args(argv)
 
     cfg = Config.load()
+
+    if args.health:
+        http = HttpClient(cfg)
+        ok = health_check(cfg, http)
+        # non-zero exit on failure
+        import sys
+
+        sys.exit(0 if ok else 1)
 
     cycle_idx = 0
     if args.once:
@@ -214,6 +252,54 @@ def main(argv: list[str] | None = None) -> None:
         if cfg.max_cycles and cycle_idx >= cfg.max_cycles:
             print(f"[cycle] reached MAX_CYCLES={cfg.max_cycles}, stopping loop")
             break
+
+
+def health_check(cfg: Config, http: HttpClient, logger=print) -> bool:
+    """
+    Quick self-test: check CMC discovery and OHLCV availability using minimal limits.
+    No side-effects. Returns True/False and prints a short report.
+    """
+    ok = True
+    try:
+        chain = (cfg.chains or ["ethereum"])[0]
+        cmc_chain = (cfg.chain_slugs or {}).get(chain, chain)
+        # Build v4 base host from configured base
+        base = cfg.cmc_dex_base.rstrip("/")
+        base_alt = (cfg.cmc_dex_base_alt or "").rstrip("/")
+        host_primary = base.split("/dexer/")[0] if "/dexer/" in base else base
+        host_alt = base_alt.split("/dexer/")[0] if base_alt else ""
+        host = host_alt or host_primary
+        v4_discovery = f"{host}/v4/dex/spot-pairs/latest"
+        doc = http.cmc_get_json(
+            v4_discovery,
+            params={"chain_slug": cmc_chain, "limit": 5, "page": 1},
+            timeout=10.0,
+        )
+        ok = ok and bool(doc)
+        logger(f"[health] discovery on {chain}/{cmc_chain}: {'OK' if doc else 'FAIL'}")
+        pair_id = None
+        try:
+            data = (doc or {}).get("data") or []
+            if data:
+                first = data[0]
+                pair_id = first.get("pair_address") or first.get("id") or first.get("pairId")
+        except Exception:
+            pass
+        if pair_id:
+            v4_ohlcv = f"{host}/v4/dex/pairs/ohlcv/latest"
+            ohlcv = http.cmc_get_json(
+                v4_ohlcv,
+                params={"pair_address": pair_id, "timeframe": "1h", "aggregate": 1, "limit": 2},
+                timeout=10.0,
+            )
+            ok = ok and bool(ohlcv)
+            logger(f"[health] ohlcv for {pair_id}: {'OK' if ohlcv else 'FAIL'}")
+        else:
+            logger("[health] skip ohlcv: no pair_id from discovery")
+    except Exception as e:
+        logger(f"[health] error: {e}")
+        ok = False
+    return ok
 
 
 if __name__ == "__main__":

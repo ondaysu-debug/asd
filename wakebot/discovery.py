@@ -292,6 +292,21 @@ def _extract_common_fields(pool: dict) -> tuple[str, dict, dict, float, int, str
     return pool_id, base_tok, quote_tok, liquidity, tx24h, pool_created_at
 
 
+def _validate_cmc_pairs_doc(doc: dict) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    data = doc.get("data")
+    if not isinstance(data, list):
+        return False
+    for item in data:
+        if not isinstance(item, dict):
+            return False
+        has_id = any(k in item for k in ("pair_address", "id", "pairId"))
+        if not has_id:
+            return False
+    return True
+
+
 def cmc_discover_by_source(
     cfg: Config,
     http: HttpClient,
@@ -305,13 +320,21 @@ def cmc_discover_by_source(
     out: list[dict] = []
     scanned_pairs = 0
     pages_done = 0
+    validation_issues = 0
 
     def _fetch_page(url: str) -> list[dict]:
-        nonlocal scanned_pairs, pages_done
+        nonlocal scanned_pairs, pages_done, validation_issues
         try:
             doc = http.cmc_get_json(url, timeout=20.0) or {}
         except Exception as e:
             print(f"[{chain}] CMC {s} error: {e}")
+            pages_done += 1
+            return []
+        # validate structure lightly
+        if not _validate_cmc_pairs_doc(doc):
+            nonlocal validation_issues
+            validation_issues += 1
+            print(f"[cmc][validate] unexpected discovery schema; skipping page")
             pages_done += 1
             return []
         data = doc.get("data") or doc.get("result") or doc.get("items") or []
@@ -389,7 +412,7 @@ def cmc_discover_by_source(
         pid = it.get("pool")
         if pid and pid not in dedup:
             dedup[pid] = it
-    return list(dedup.values()), {"pages_done": pages_done, "scanned_pairs": scanned_pairs}
+    return list(dedup.values()), {"pages_done": pages_done, "scanned_pairs": scanned_pairs, "validation_issues": validation_issues}
 
 
 def cmc_discover_candidates(
@@ -413,6 +436,7 @@ def cmc_discover_candidates(
     pages_planned = 0
     pages_done_total = 0
     scanned_pairs_total = 0
+    validation_issues_total = 0
     all_items: list[dict] = []
     with storage.get_conn() as conn:
         for source in chosen_sources:
@@ -425,13 +449,15 @@ def cmc_discover_candidates(
             pages_planned += int(limit)
             # bump progress cursor for next cycle
             storage.bump_progress(conn, chain, source, start_page + max(1, limit))
+            # accumulate validation issues
+            validation_issues_total += int(stats.get("validation_issues", 0))
 
     percent = (100.0 * pages_done_total / float(pages_planned)) if pages_planned > 0 else 100.0
     print(
         f"[discover][{chain}] pages: {pages_done_total}/{pages_planned} ({percent:.0f}%), "
         f"candidates: {len(all_items)}, scanned: {scanned_pairs_total}"
     )
-    return all_items, {"pages_planned": pages_planned, "pages_done": pages_done_total, "scanned_pairs": scanned_pairs_total, "sources_used": len(chosen_sources)}
+    return all_items, {"pages_planned": pages_planned, "pages_done": pages_done_total, "scanned_pairs": scanned_pairs_total, "sources_used": len(chosen_sources), "validation_issues": validation_issues_total}
 
 
 def gt_discover_candidates(

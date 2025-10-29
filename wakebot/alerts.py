@@ -199,5 +199,6 @@ def build_revival_text_cmc(meta: AlertInputs, chain_label: str, vol1h: float, pr
         f"1h Vol: ${_nice(vol1h)} ({source_label})\n"
         f"Prev 24h Vol: ${_nice(prev24h)}\n"
         f"Ratio 1h/prev24h: {ratio:.2f}x\n"
+        f"Source: {source_label}\n"
         f"Link: {_escape_markdown(meta.url)}"
     )
