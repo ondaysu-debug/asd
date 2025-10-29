@@ -78,6 +78,8 @@ class Config:
     alert_ratio_min: float
     min_prev24_usd: float
     revival_min_age_days: int
+    # Data quality logs
+    dq_warn_threshold: float
 
     # Seen-cache for OHLCV budget saving
     seen_ttl_min: int
@@ -167,6 +169,7 @@ class Config:
         alert_ratio_min = float(os.getenv("ALERT_RATIO_MIN", "1.0"))
         min_prev24_usd = float(os.getenv("MIN_PREV24_USD", "1000"))
         revival_min_age_days = int(os.getenv("REVIVAL_MIN_AGE_DAYS", "7"))
+        dq_warn_threshold = float(os.getenv("DQ_WARN_THRESHOLD", "0.25"))
         # Prefer minutes var; fall back to seconds
         seen_ttl_min = int(os.getenv("SEEN_TTL_MIN", "15"))
         seen_ttl_sec_env = os.getenv("SEEN_TTL_SEC")
@@ -227,6 +230,7 @@ class Config:
             alert_ratio_min=alert_ratio_min,
             min_prev24_usd=min_prev24_usd,
             revival_min_age_days=revival_min_age_days,
+            dq_warn_threshold=dq_warn_threshold,
             seen_ttl_min=seen_ttl_min,
             seen_ttl_sec=seen_ttl_sec,
             save_candidates=save_candidates,

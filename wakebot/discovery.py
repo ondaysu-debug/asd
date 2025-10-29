@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 
 from .config import Config
+from .cmc import _validate_cmc_pairs_doc
 from .filters import is_base_token_acceptable, is_token_native_pair, pool_data_filters
 from .gecko import _normalize_gt_chain
 from .net_http import HttpClient
@@ -303,12 +304,17 @@ def cmc_discover_by_source(
     scanned_pairs = 0
     pages_done = 0
 
-    def _fetch_page(url: str) -> list[dict]:
+    def _fetch_page(url: str, params: dict | None = None, page_num: int | None = None) -> list[dict]:
         nonlocal scanned_pairs, pages_done
         try:
-            doc = http.cmc_get_json(url, timeout=20.0) or {}
+            doc = http.cmc_get_json(url, params=params or {}, timeout=20.0) or {}
         except Exception as e:
             print(f"[{chain}] CMC {s} error: {e}")
+            pages_done += 1
+            return []
+        if not _validate_cmc_pairs_doc(doc):
+            pno = page_num if page_num is not None else "?"
+            print(f"[cmc][validate] unexpected discovery schema; skipping page {pno}")
             pages_done += 1
             return []
         data = doc.get("data") or doc.get("result") or doc.get("items") or []
@@ -347,27 +353,28 @@ def cmc_discover_by_source(
     if s in {"new", "trending", "pools"}:
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
             # Use CMC DEX API v4 endpoints
-            if s == "new":
-                url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/latest?chain_slug={cmc_chain}&page={page}&limit={cfg.cmc_page_size}"
-            elif s == "trending":
-                url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/trending?chain_slug={cmc_chain}&page={page}&limit={cfg.cmc_page_size}"
-            else:  # pools
-                url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/latest?chain_slug={cmc_chain}&page={page}&limit={cfg.cmc_page_size}"
-            items = _fetch_page(url)
+            if s == "trending":
+                url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/trending"
+            else:  # new/pools use latest
+                url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/latest"
+            params = {"chain_slug": cmc_chain, "page": page, "limit": cfg.cmc_page_size}
+            items = _fetch_page(url, params, page)
             if items:
                 out.extend(items)
     elif s == "dexes":
         # For dexes, we'll use the general pools endpoint as CMC may not have specific dex endpoints
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-            url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/latest?chain_slug={cmc_chain}&page={page}&limit={cfg.cmc_page_size}"
-            items = _fetch_page(url)
+            url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/latest"
+            params = {"chain_slug": cmc_chain, "page": page, "limit": cfg.cmc_page_size}
+            items = _fetch_page(url, params, page)
             if items:
                 out.extend(items)
     else:
         # treat as pools
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-            url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/latest?chain_slug={cmc_chain}&page={page}&limit={cfg.cmc_page_size}"
-            items = _fetch_page(url)
+            url = f"{cfg.cmc_dex_base}/v4/dex/spot-pairs/latest"
+            params = {"chain_slug": cmc_chain, "page": page, "limit": cfg.cmc_page_size}
+            items = _fetch_page(url, params, page)
             if items:
                 out.extend(items)
 
