@@ -150,6 +150,7 @@ def _ds_refill_tokens(now: float) -> None:
 
 def _ds_acquire_token_blocking():
     """Acquire one token from the global DS token bucket, blocking if needed."""
+    global _DS_TOKENS, _DS_EFFECTIVE_RATE, _DS_LAST_REFILL
     while True:
         with _DS_STATE_LOCK:
             now = time.monotonic()
