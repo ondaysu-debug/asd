@@ -30,7 +30,9 @@ class HttpClient:
         # per-cycle accounting
         self._cycle_started_at = time.monotonic()
         self._cycle_requests = 0
-        self._cycle_penalty = 0
+        self._cycle_penalty = 0.0
+        self._cycle_429 = 0
+        self._rps_effective = max(0.0, float(cfg.cmc_calls_per_min) / 60.0)
 
         # global rate limiter for GeckoTerminal (public rate ~<30/min)
         base_rps = max(0.0, float(cfg.gecko_calls_per_min) / 60.0)
@@ -65,24 +67,40 @@ class HttpClient:
             ),
             log_fn=self._log,
         )
+    
+    def update_effective_rps(self) -> None:
+        """Update effective RPS from CMC limiter"""
+        try:
+            self._rps_effective = self._cmc_limiter.get_rate()
+        except Exception:
+            pass
 
     # ----- Per-cycle accounting -----
     def reset_cycle_counters(self) -> None:
         self._cycle_started_at = time.monotonic()
         self._cycle_requests = 0
-        self._cycle_penalty = 0
+        self._cycle_penalty = 0.0
+        self._cycle_429 = 0
+        # preserve current effective RPS
 
     def get_cycle_requests(self) -> int:
         return int(self._cycle_requests)
 
-    def add_penalty(self, n: int = 1) -> None:
+    def add_penalty(self, seconds: float = 1.0) -> None:
+        """Add penalty seconds (Retry-After or backoff sleep)"""
         try:
-            self._cycle_penalty += int(n)
+            self._cycle_penalty += float(seconds)
         except Exception:
-            self._cycle_penalty += 1
+            self._cycle_penalty += 1.0
 
-    def get_cycle_penalty(self) -> int:
-        return int(self._cycle_penalty)
+    def get_cycle_penalty(self) -> float:
+        return float(self._cycle_penalty)
+    
+    def get_cycle_429(self) -> int:
+        return int(self._cycle_429)
+    
+    def get_effective_rps(self) -> float:
+        return float(self._rps_effective)
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
@@ -125,15 +143,19 @@ class HttpClient:
 
             # Respect Retry-After
             if status == 429:
+                self._cycle_429 += 1
                 retry_after_hdr = r.headers.get("Retry-After")
                 if retry_after_hdr:
                     sleep_s = _parse_retry_after(retry_after_hdr)
                     if sleep_s is not None and sleep_s > 0:
                         cap = max(0.0, self._cfg.gecko_retry_after_cap_s)
+                        actual_sleep = min(sleep_s, cap)
                         self._log(f"[gt] 429 Retry-After {sleep_s:.3f}s (cap {cap:.3f}s)")
-                        time.sleep(min(sleep_s, cap))
-                # count penalty for dynamic budget
-                self.add_penalty(1)
+                        time.sleep(actual_sleep)
+                        self.add_penalty(actual_sleep)
+                else:
+                    # No Retry-After header, count minimal penalty
+                    self.add_penalty(0.5)
             r.raise_for_status()
             try:
                 return r.json() or {}
@@ -165,14 +187,19 @@ class HttpClient:
 
             # Respect Retry-After for 429
             if status == 429:
+                self._cycle_429 += 1
                 retry_after_hdr = r.headers.get("Retry-After")
                 if retry_after_hdr:
                     sleep_s = _parse_retry_after(retry_after_hdr)
                     if sleep_s is not None and sleep_s > 0:
                         cap = max(0.0, self._cfg.cmc_retry_after_cap_s)
+                        actual_sleep = min(sleep_s, cap)
                         self._log(f"[cmc] 429 Retry-After {sleep_s:.3f}s (cap {cap:.3f}s)")
-                        time.sleep(min(sleep_s, cap))
-                self.add_penalty(1)
+                        time.sleep(actual_sleep)
+                        self.add_penalty(actual_sleep)
+                else:
+                    # No Retry-After header, count minimal penalty
+                    self.add_penalty(0.5)
 
             # If unauthorized/forbidden or persistent 404, try ALT base once
             if status in (401, 403) or status == 404:

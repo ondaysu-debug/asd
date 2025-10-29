@@ -188,7 +188,12 @@ def should_alert_revival_cmc(vol1h: float, prev24h: float, ok_age: bool, cfg: Co
     return float(vol1h) > float(prev24h) * float(cfg.alert_ratio_min)
 
 
-def build_revival_text_cmc(meta: AlertInputs, chain_label: str, vol1h: float, prev24h: float) -> str:
+def build_revival_text_cmc(meta: AlertInputs, chain_label: str, vol1h: float, prev24h: float, source: str = "CMC DEX") -> str:
+    """
+    Build revival alert text with source indicator.
+    
+    source: "CMC DEX" or "CMC→GT fallback" or similar
+    """
     ratio = (float(vol1h) / float(prev24h)) if float(prev24h) > 0 else float("inf")
     return (
         f"🚨 REVIVAL ({chain_label})\n"
@@ -196,8 +201,9 @@ def build_revival_text_cmc(meta: AlertInputs, chain_label: str, vol1h: float, pr
         f"Token: {_escape_markdown(meta.token_symbol or 'n/a')}\n"
         f"Contract: `{_escape_markdown(meta.token_addr or 'n/a')}`\n"
         f"Liquidity: ${_nice(meta.liquidity)}\n\n"
-        f"1h Vol: ${_nice(vol1h)} (CMC DEX)\n"
+        f"1h Vol: ${_nice(vol1h)}\n"
         f"Prev 24h Vol: ${_nice(prev24h)}\n"
         f"Ratio 1h/prev24h: {ratio:.2f}x\n"
+        f"Source: {source}\n"
         f"Link: {_escape_markdown(meta.url)}"
     )

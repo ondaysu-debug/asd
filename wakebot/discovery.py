@@ -8,6 +8,29 @@ from .gecko import _normalize_gt_chain
 from .net_http import HttpClient
 
 
+def _validate_cmc_pairs_doc(doc: dict) -> bool:
+    """
+    Validate CMC discovery response structure.
+    Expected: {"data": [...]} where each item has pair identifiers and token info.
+    """
+    if not isinstance(doc, dict):
+        return False
+    data = doc.get("data") or doc.get("result") or doc.get("items")
+    if not isinstance(data, list):
+        return False
+    
+    # Each element should have at least one identifier for the pair
+    for item in data:
+        if not isinstance(item, dict):
+            return False
+        # Check for any common pair ID fields
+        has_id = any(k in item for k in ("pair_address", "id", "pairId", "pool_id", "address", "poolAddress"))
+        if not has_id:
+            return False
+    
+    return True
+
+
 def _source_to_endpoint(source: str) -> str:
     s = (source or "").strip().lower()
     if s == "new":
@@ -306,7 +329,7 @@ def cmc_discover_by_source(
     scanned_pairs = 0
     pages_done = 0
 
-    def _fetch_page(url: str) -> list[dict]:
+    def _fetch_page(url: str, page_num: int) -> list[dict]:
         nonlocal scanned_pairs, pages_done
         try:
             doc = http.cmc_get_json(url, timeout=20.0) or {}
@@ -314,6 +337,13 @@ def cmc_discover_by_source(
             print(f"[{chain}] CMC {s} error: {e}")
             pages_done += 1
             return []
+        
+        # Validate response structure
+        if not _validate_cmc_pairs_doc(doc):
+            print(f"[cmc][validate] unexpected discovery schema; skipping {chain}/{s} page {page_num}")
+            pages_done += 1
+            return []
+        
         data = doc.get("data") or doc.get("result") or doc.get("items") or []
         items: list[dict] = []
         seen: set[str] = set()
@@ -353,7 +383,7 @@ def cmc_discover_by_source(
             if url.endswith("/"):
                 url = url[:-1]
             url = f"{url}?page={page}&page_size={cfg.cmc_page_size}"
-            items = _fetch_page(url)
+            items = _fetch_page(url, page)
             if items:
                 out.extend(items)
     elif s == "dexes":
@@ -372,14 +402,14 @@ def cmc_discover_by_source(
         for dex_id in dex_ids:
             for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
                 url = f"{cfg.cmc_dex_base}/{cmc_chain}/dexes/{dex_id}/pools?page={page}&page_size={cfg.cmc_page_size}"
-                items = _fetch_page(url)
+                items = _fetch_page(url, page)
                 if items:
                     out.extend(items)
     else:
         # treat as pools
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
             url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools?page={page}&page_size={cfg.cmc_page_size}"
-            items = _fetch_page(url)
+            items = _fetch_page(url, page)
             if items:
                 out.extend(items)
 
