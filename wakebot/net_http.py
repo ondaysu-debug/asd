@@ -27,6 +27,10 @@ class HttpClient:
         self._cfg = cfg
         self._log = log_fn or _default_logger
         self._local = threading.local()
+        # per-cycle accounting
+        self._cycle_started_at = time.monotonic()
+        self._cycle_requests = 0
+        self._cycle_penalty = 0
 
         # global rate limiter for GeckoTerminal (public rate ~<30/min)
         base_rps = max(0.0, float(cfg.gecko_calls_per_min) / 60.0)
@@ -44,6 +48,24 @@ class HttpClient:
             ),
             log_fn=self._log,
         )
+
+    # ----- Per-cycle accounting -----
+    def reset_cycle_counters(self) -> None:
+        self._cycle_started_at = time.monotonic()
+        self._cycle_requests = 0
+        self._cycle_penalty = 0
+
+    def get_cycle_requests(self) -> int:
+        return int(self._cycle_requests)
+
+    def add_penalty(self, n: int = 1) -> None:
+        try:
+            self._cycle_penalty += int(n)
+        except Exception:
+            self._cycle_penalty += 1
+
+    def get_cycle_penalty(self) -> int:
+        return int(self._cycle_penalty)
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
@@ -93,6 +115,8 @@ class HttpClient:
                         cap = max(0.0, self._cfg.gecko_retry_after_cap_s)
                         self._log(f"[gt] 429 Retry-After {sleep_s:.3f}s (cap {cap:.3f}s)")
                         time.sleep(min(sleep_s, cap))
+                # count penalty for dynamic budget
+                self.add_penalty(1)
             r.raise_for_status()
             try:
                 return r.json() or {}
@@ -100,6 +124,11 @@ class HttpClient:
                 return {}
         finally:
             self._limiter.release()
+            # count any finished HTTP request toward the cycle budget
+            try:
+                self._cycle_requests += 1
+            except Exception:
+                self._cycle_requests = int(self._cycle_requests) + 1
 
 
 def _parse_retry_after(value: str) -> Optional[float]:

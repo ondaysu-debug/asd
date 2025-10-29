@@ -37,10 +37,16 @@ class Config:
 
     # Discovery sources and breadth
     gecko_sources: str
+    gecko_rotate_sources: bool = True
     gecko_pages_per_chain: int
+    gecko_dex_pages_per_chain: int = 1
     gecko_page_size: int
 
-    # Budget for OHLCV probes
+    # Budget for OHLCV probes (dynamic per cycle)
+    max_ohlcv_probes_cap: int = 30
+    gecko_safety_budget: int = 4
+    min_ohlcv_probes: int = 3
+    # Back-compat (tests and older code may still reference this)
     max_ohlcv_probes: int
 
     # Loop/concurrency
@@ -54,6 +60,8 @@ class Config:
     alert_ratio_min: float
 
     # Seen-cache for OHLCV budget saving
+    seen_ttl_min: int = 15
+    # Back-compat (tests use seconds)
     seen_ttl_sec: int
 
     # Logging candidates
@@ -65,6 +73,14 @@ class Config:
 
     # Helper properties (populated in load())
     gecko_sources_list: List[str] | None = None
+    
+    # Revival algorithm configuration
+    revival_enabled: bool = True
+    revival_min_age_days: int = 7
+    revival_prev_week_max_usd: float = 3000.0
+    revival_now_24h_min_usd: float = 1500.0
+    revival_ratio_min: float = 2.0
+    revival_use_last_hours: int = 0
 
     @staticmethod
     def load(env_path: str | None = None, override: bool = True) -> "Config":
@@ -86,15 +102,21 @@ class Config:
         # GT limits/cache
         gecko_calls_per_min = int(os.getenv("GECKO_CALLS_PER_MIN", "28"))
         gecko_retry_after_cap_s = float(os.getenv("GECKO_RETRY_AFTER_CAP_S", "3.0"))
-        gecko_ttl_sec = int(os.getenv("GECKO_TTL_SEC", "30"))
+        gecko_ttl_sec = int(os.getenv("GECKO_TTL_SEC", "60"))
 
         # Sources
-        gecko_sources = os.getenv("GECKO_SOURCES", "new,trending")
-        gecko_pages_per_chain = int(os.getenv("GECKO_PAGES_PER_CHAIN", "3"))
+        gecko_sources = os.getenv("GECKO_SOURCES", "new,trending,pools,dexes")
+        gecko_rotate_sources = _as_bool(os.getenv("GECKO_ROTATE_SOURCES", "true"))
+        gecko_pages_per_chain = int(os.getenv("GECKO_PAGES_PER_CHAIN", "2"))
+        gecko_dex_pages_per_chain = int(os.getenv("GECKO_DEX_PAGES_PER_CHAIN", "1"))
         gecko_page_size = int(os.getenv("GECKO_PAGE_SIZE", "100"))
 
-        # Budget
-        max_ohlcv_probes = int(os.getenv("MAX_OHLCV_PROBES", "30"))
+        # Budget (dynamic OHLCV)
+        max_ohlcv_probes_cap = int(os.getenv("MAX_OHLCV_PROBES_CAP", "30"))
+        gecko_safety_budget = int(os.getenv("GECKO_SAFETY_BUDGET", "4"))
+        min_ohlcv_probes = int(os.getenv("MIN_OHLCV_PROBES", "3"))
+        # Back-compat
+        max_ohlcv_probes = int(os.getenv("MAX_OHLCV_PROBES", str(max_ohlcv_probes_cap)))
 
         # Concurrency and loop
         cooldown_min = int(os.getenv("COOLDOWN_MIN", "30"))
@@ -104,8 +126,11 @@ class Config:
         max_cycles = max(0, int(os.getenv("MAX_CYCLES", "0")))
 
         # Alerting/noise reduction and seen-cache
-        alert_ratio_min = float(os.getenv("ALERT_RATIO_MIN", "1.10"))
-        seen_ttl_sec = int(os.getenv("SEEN_TTL_SEC", "900"))
+        alert_ratio_min = float(os.getenv("ALERT_RATIO_MIN", "1.0"))
+        # Prefer minutes var; fall back to seconds
+        seen_ttl_min = int(os.getenv("SEEN_TTL_MIN", "15"))
+        seen_ttl_sec_env = os.getenv("SEEN_TTL_SEC")
+        seen_ttl_sec = int(seen_ttl_sec_env) if seen_ttl_sec_env else int(seen_ttl_min * 60)
 
         # Logging
         save_candidates = _as_bool(os.getenv("SAVE_CANDIDATES", "true"))
@@ -113,6 +138,14 @@ class Config:
 
         # Database
         db_path = Path(os.getenv("DB_PATH", "wake_state.sqlite")).expanduser()
+
+        # Revival configuration
+        revival_enabled = _as_bool(os.getenv("REVIVAL_ENABLED", "true"))
+        revival_min_age_days = int(os.getenv("REVIVAL_MIN_AGE_DAYS", "7"))
+        revival_prev_week_max_usd = float(os.getenv("REVIVAL_PREV_WEEK_MAX_USD", "3000"))
+        revival_now_24h_min_usd = float(os.getenv("REVIVAL_NOW_24H_MIN_USD", "1500"))
+        revival_ratio_min = float(os.getenv("REVIVAL_RATIO_MIN", "2.0"))
+        revival_use_last_hours = int(os.getenv("REVIVAL_USE_LAST_HOURS", "0"))
 
         cfg = Config(
             tg_bot_token=tg_bot_token,
@@ -127,8 +160,13 @@ class Config:
             gecko_retry_after_cap_s=gecko_retry_after_cap_s,
             gecko_ttl_sec=gecko_ttl_sec,
             gecko_sources=gecko_sources,
+            gecko_rotate_sources=gecko_rotate_sources,
             gecko_pages_per_chain=gecko_pages_per_chain,
+            gecko_dex_pages_per_chain=gecko_dex_pages_per_chain,
             gecko_page_size=gecko_page_size,
+            max_ohlcv_probes_cap=max_ohlcv_probes_cap,
+            gecko_safety_budget=gecko_safety_budget,
+            min_ohlcv_probes=min_ohlcv_probes,
             max_ohlcv_probes=max_ohlcv_probes,
             cooldown_min=cooldown_min,
             loop_seconds=loop_seconds,
@@ -136,6 +174,7 @@ class Config:
             alert_fetch_workers=alert_fetch_workers,
             max_cycles=max_cycles,
             alert_ratio_min=alert_ratio_min,
+            seen_ttl_min=seen_ttl_min,
             seen_ttl_sec=seen_ttl_sec,
             save_candidates=save_candidates,
             candidates_path=candidates_path,
@@ -144,4 +183,12 @@ class Config:
 
         # helper: parsed list of sources
         cfg.gecko_sources_list = [s.strip() for s in (cfg.gecko_sources or "").split(",") if s.strip()]
+
+        # Attach revival config
+        cfg.revival_enabled = revival_enabled
+        cfg.revival_min_age_days = revival_min_age_days
+        cfg.revival_prev_week_max_usd = revival_prev_week_max_usd
+        cfg.revival_now_24h_min_usd = revival_now_24h_min_usd
+        cfg.revival_ratio_min = revival_ratio_min
+        cfg.revival_use_last_hours = revival_use_last_hours
         return cfg
