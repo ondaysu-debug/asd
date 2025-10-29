@@ -21,6 +21,7 @@ class AlertInputs:
     token_symbol: str
     token_addr: str
     liquidity: float
+    pool_created_at: str = ""
 
 
 class Notifier:
@@ -174,4 +175,29 @@ def build_revival_text(meta: AlertInputs, chain_label: str, w: RevivalWindow) ->
         f"Prev 7d (excl. last 24h): ${_nice(w.prev_week)}\n"
         f"Ratio now/prev7d: {ratio:.2f}x\n"
         f"Link: https://www.geckoterminal.com/{_escape_markdown(meta.chain)}/pools/{_escape_markdown(meta.pool)}"
+    )
+
+
+# --------- New CMC revival helpers (1h vs prev24h) ---------
+
+def should_alert_revival_cmc(vol1h: float, prev24h: float, ok_age: bool, cfg: Config) -> bool:
+    if not ok_age:
+        return False
+    if not (prev24h >= float(cfg.min_prev24_usd)):
+        return False
+    return float(vol1h) > float(prev24h) * float(cfg.alert_ratio_min)
+
+
+def build_revival_text_cmc(meta: AlertInputs, chain_label: str, vol1h: float, prev24h: float) -> str:
+    ratio = (float(vol1h) / float(prev24h)) if float(prev24h) > 0 else float("inf")
+    return (
+        f"🚨 REVIVAL ({chain_label})\n"
+        f"Pool: {_escape_markdown(meta.pool)}\n"
+        f"Token: {_escape_markdown(meta.token_symbol or 'n/a')}\n"
+        f"Contract: `{_escape_markdown(meta.token_addr or 'n/a')}`\n"
+        f"Liquidity: ${_nice(meta.liquidity)}\n\n"
+        f"1h Vol: ${_nice(vol1h)} (CMC DEX)\n"
+        f"Prev 24h Vol: ${_nice(prev24h)}\n"
+        f"Ratio 1h/prev24h: {ratio:.2f}x\n"
+        f"Link: {_escape_markdown(meta.url)}"
     )

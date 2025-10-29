@@ -218,6 +218,221 @@ def gt_discover_by_source(
     return list(dedup.values())
 
 
+# ---------------- CMC DEX discovery ----------------
+
+def _normalize_cmc_chain(chain: str) -> str:
+    # CMC DEX uses canonical names: 'ethereum','bsc','solana','base'
+    s = (chain or "").strip().lower()
+    if s in {"ethereum", "bsc", "solana", "base"}:
+        return s
+    return s
+
+
+def _cmc_pool_url_hint(pool_id: str) -> str:
+    # Best-effort clickable hint if CMC UI path differs
+    try:
+        pid = (pool_id or "").strip()
+        if pid:
+            return f"https://coinmarketcap.com/dexscan/pairs/{pid}"
+    except Exception:
+        pass
+    return ""
+
+
+def _extract_token(item: dict, prefix: str) -> dict:
+    tok = {}
+    # flat style
+    tok["address"] = item.get(f"{prefix}_address") or item.get(f"{prefix}Address") or ""
+    tok["symbol"] = item.get(f"{prefix}_symbol") or item.get(f"{prefix}Symbol") or ""
+    # nested style
+    nested = item.get(prefix) or item.get(f"{prefix}_token") or {}
+    if not tok["address"]:
+        tok["address"] = nested.get("address") or nested.get("contract_address") or ""
+    if not tok["symbol"]:
+        tok["symbol"] = nested.get("symbol") or nested.get("ticker") or ""
+    return tok
+
+
+def _extract_common_fields(pool: dict) -> tuple[str, dict, dict, float, int, str]:
+    # pool id
+    pool_id = pool.get("id") or pool.get("pool_id") or pool.get("address") or pool.get("poolAddress") or ""
+    base_tok = _extract_token(pool, "base")
+    quote_tok = _extract_token(pool, "quote")
+    # liquidity
+    liq = (
+        pool.get("reserve_in_usd")
+        or pool.get("liquidity_in_usd")
+        or pool.get("liquidity_usd")
+        or pool.get("liquidity")
+        or 0.0
+    )
+    try:
+        liquidity = float(liq)
+    except Exception:
+        liquidity = 0.0
+    # tx24h
+    tx24h = 0
+    tx = pool.get("transactions") or pool.get("tx") or {}
+    if isinstance(tx, dict):
+        h24 = tx.get("h24") or tx.get("24h") or {}
+        try:
+            buys = int(h24.get("buys") or h24.get("buy") or pool.get("buys24h") or 0)
+            sells = int(h24.get("sells") or h24.get("sell") or pool.get("sells24h") or 0)
+            tx24h = buys + sells
+        except Exception:
+            tx24h = int(pool.get("tx24h") or 0)
+    else:
+        try:
+            tx24h = int(pool.get("tx24h") or 0)
+        except Exception:
+            tx24h = 0
+    # created at
+    pool_created_at = pool.get("pool_created_at") or pool.get("created_at") or pool.get("createdAt") or ""
+    return pool_id, base_tok, quote_tok, liquidity, tx24h, pool_created_at
+
+
+def cmc_discover_by_source(
+    cfg: Config,
+    http: HttpClient,
+    chain: str,
+    source: str,
+    start_page: int,
+    page_limit: int,
+) -> tuple[list[dict], dict[str, int]]:
+    cmc_chain = _normalize_cmc_chain(chain)
+    s = (source or "").strip().lower()
+    out: list[dict] = []
+    scanned_pairs = 0
+    pages_done = 0
+
+    def _fetch_page(url: str) -> list[dict]:
+        nonlocal scanned_pairs, pages_done
+        try:
+            doc = http.cmc_get_json(url, timeout=20.0) or {}
+        except Exception as e:
+            print(f"[{chain}] CMC {s} error: {e}")
+            pages_done += 1
+            return []
+        data = doc.get("data") or doc.get("result") or doc.get("items") or []
+        items: list[dict] = []
+        seen: set[str] = set()
+        for pool in data:
+            pool_id, base_tok, quote_tok, liquidity, tx24h, pool_created_at = _extract_common_fields(pool)
+            if not pool_id or pool_id in seen:
+                continue
+            seen.add(pool_id)
+            scanned_pairs += 1
+            ok, token_side, native_side = is_token_native_pair(chain, base_tok, quote_tok)
+            if not ok:
+                continue
+            if not is_base_token_acceptable(chain, token_side):
+                continue
+            if not pool_data_filters(liquidity, cfg.liquidity_min, cfg.liquidity_max, tx24h, cfg.tx24h_max):
+                continue
+            items.append(
+                {
+                    "chain": chain,
+                    "pool": pool_id,
+                    "url": _cmc_pool_url_hint(pool_id),
+                    "baseSymbol": (token_side.get("symbol") or ""),
+                    "baseAddr": (token_side.get("address") or ""),
+                    "quoteSymbol": (native_side.get("symbol") or ""),
+                    "quoteAddr": (native_side.get("address") or ""),
+                    "liquidity": float(liquidity or 0.0),
+                    "tx24h": int(tx24h or 0),
+                    "pool_created_at": pool_created_at or "",
+                }
+            )
+        pages_done += 1
+        return items
+
+    if s in {"new", "trending", "pools"}:
+        for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
+            url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools/{'new' if s=='new' else 'trending' if s=='trending' else ''}"
+            if url.endswith("/"):
+                url = url[:-1]
+            url = f"{url}?page={page}&page_size={cfg.cmc_page_size}"
+            items = _fetch_page(url)
+            if items:
+                out.extend(items)
+    elif s == "dexes":
+        # list dexes
+        dexes_url = f"{cfg.cmc_dex_base}/{cmc_chain}/dexes"
+        try:
+            doc = http.cmc_get_json(dexes_url, timeout=20.0) or {}
+            dex_items = doc.get("data") or doc.get("result") or []
+        except Exception:
+            dex_items = []
+        dex_ids: list[str] = []
+        for d in dex_items:
+            _id = (d.get("id") or d.get("dex_id") or d.get("slug") or "").strip()
+            if _id:
+                dex_ids.append(_id)
+        for dex_id in dex_ids:
+            for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
+                url = f"{cfg.cmc_dex_base}/{cmc_chain}/dexes/{dex_id}/pools?page={page}&page_size={cfg.cmc_page_size}"
+                items = _fetch_page(url)
+                if items:
+                    out.extend(items)
+    else:
+        # treat as pools
+        for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
+            url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools?page={page}&page_size={cfg.cmc_page_size}"
+            items = _fetch_page(url)
+            if items:
+                out.extend(items)
+
+    # de-duplicate by pool id
+    dedup: Dict[str, dict] = {}
+    for it in out:
+        pid = it.get("pool")
+        if pid and pid not in dedup:
+            dedup[pid] = it
+    return list(dedup.values()), {"pages_done": pages_done, "scanned_pairs": scanned_pairs}
+
+
+def cmc_discover_candidates(
+    cfg: Config,
+    http: HttpClient,
+    storage,
+    chain: str,
+    *,
+    cycle_idx: int,
+) -> tuple[list[dict], dict[str, int]]:
+    sources = cfg.cmc_sources_list or ["new"]
+    if not sources:
+        sources = ["new"]
+    # rotate sources if enabled: pick exactly one for this cycle
+    if cfg.cmc_rotate_sources:
+        idx = (max(0, cycle_idx - 1)) % len(sources)
+        chosen_sources = [sources[idx]]
+    else:
+        chosen_sources = sources
+
+    pages_planned = 0
+    pages_done_total = 0
+    scanned_pairs_total = 0
+    all_items: list[dict] = []
+    with storage.get_conn() as conn:
+        for source in chosen_sources:
+            start_page = storage.get_progress(conn, chain, source)
+            limit = cfg.cmc_dex_pages_per_chain if source.strip().lower() == "dexes" else cfg.cmc_pages_per_chain
+            items, stats = cmc_discover_by_source(cfg, http, chain, source, start_page, limit)
+            all_items.extend(items)
+            pages_done_total += int(stats.get("pages_done", 0))
+            scanned_pairs_total += int(stats.get("scanned_pairs", 0))
+            pages_planned += int(limit)
+            # bump progress cursor for next cycle
+            storage.bump_progress(conn, chain, source, start_page + max(1, limit))
+
+    percent = (100.0 * pages_done_total / float(pages_planned)) if pages_planned > 0 else 100.0
+    print(
+        f"[discover][{chain}] pages: {pages_done_total}/{pages_planned} ({percent:.0f}%), "
+        f"candidates: {len(all_items)}, scanned: {scanned_pairs_total}"
+    )
+    return all_items, {"pages_planned": pages_planned, "pages_done": pages_done_total, "scanned_pairs": scanned_pairs_total, "sources_used": len(chosen_sources)}
+
+
 def gt_discover_candidates(
     cfg: Config, http: HttpClient, storage, chain: str, *, cycle_idx: int
 ) -> list[dict]:
