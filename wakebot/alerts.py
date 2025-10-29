@@ -8,7 +8,7 @@ from typing import Callable, Tuple
 import requests
 
 from .config import Config
-from .gecko import GeckoCache, fetch_ohlcv_49h
+from .gecko import GeckoCache, fetch_ohlcv_49h, RevivalWindow
 from .net_http import HttpClient
 from .storage import Storage
 
@@ -93,7 +93,7 @@ def maybe_alert(
             return {"probed": True, "probed_ok": False, "alert": False}
         vol1h, prev48h, source_tag = ws
         # Mark as seen regardless of alert outcome to avoid repeated OHLCV probes within TTL
-        storage.mark_as_seen(conn, meta.pool)
+        storage.mark_as_seen(conn, meta.chain, meta.pool)
         if prev48h <= 0:
             return {"probed": True, "probed_ok": False, "alert": False}
 
@@ -140,3 +140,38 @@ _MD_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!])")
 
 def _escape_md(s: str) -> str:
     return _MD_RE.sub(r"\\\1", s or "")
+
+
+# alias per spec name
+def _escape_markdown(s: str) -> str:
+    return _escape_md(s)
+
+
+def should_revival(w: RevivalWindow, cfg: Config) -> bool:
+    if not w.ok_age:
+        return False
+    if not (w.now_24h >= cfg.revival_now_24h_min_usd):
+        return False
+    if not (w.prev_week <= cfg.revival_prev_week_max_usd):
+        return False
+    if not (w.now_24h >= w.prev_week * cfg.revival_ratio_min):
+        return False
+    if cfg.revival_use_last_hours > 0 and w.last_h_opt is not None:
+        if not (w.last_h_opt >= w.prev_week * cfg.revival_ratio_min):
+            return False
+    return True
+
+
+def build_revival_text(meta: AlertInputs, chain_label: str, w: RevivalWindow) -> str:
+    ratio = (w.now_24h / w.prev_week) if w.prev_week > 0 else float("inf")
+    return (
+        f"🚨 REVIVAL ({chain_label})\n"
+        f"Pool: {_escape_markdown(meta.pool)}\n"
+        f"Token: {_escape_markdown(meta.token_symbol or 'n/a')}\n"
+        f"Contract: `{_escape_markdown(meta.token_addr or 'n/a')}`\n"
+        f"Liquidity: ${_nice(meta.liquidity)}\n\n"
+        f"Now 24h Vol: ${_nice(w.now_24h)}\n"
+        f"Prev 7d (excl. last 24h): ${_nice(w.prev_week)}\n"
+        f"Ratio now/prev7d: {ratio:.2f}x\n"
+        f"Link: https://www.geckoterminal.com/{_escape_markdown(meta.chain)}/pools/{_escape_markdown(meta.pool)}"
+    )

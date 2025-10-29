@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 from pathlib import Path
+import time
 from typing import Any, Iterable
 
 from .config import Config
@@ -27,11 +28,35 @@ class Storage:
                 )
                 """
             )
+            # seen_pools migration: ensure (chain,pool) schema
+            try:
+                cur = conn.execute("PRAGMA table_info(seen_pools)")
+                cols = [row[1] for row in cur.fetchall()]
+            except Exception:
+                cols = []
+            if cols and ("chain" not in cols or "pool" not in cols or "seen_ts" not in cols):
+                # rename legacy table
+                conn.execute("ALTER TABLE seen_pools RENAME TO seen_pools_legacy")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS seen_pools(
-                  pool TEXT PRIMARY KEY,
-                  last_seen_ts INTEGER
+                  chain TEXT NOT NULL,
+                  pool  TEXT NOT NULL,
+                  seen_ts INTEGER NOT NULL,
+                  PRIMARY KEY(chain, pool)
+                )
+                """
+            )
+            # progress cursors
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS progress_cursors(
+                  chain   TEXT NOT NULL,
+                  source  TEXT NOT NULL,
+                  page    INTEGER NOT NULL DEFAULT 1,
+                  extra   TEXT,
+                  updated_ts INTEGER NOT NULL,
+                  PRIMARY KEY(chain, source)
                 )
                 """
             )
@@ -66,30 +91,51 @@ class Storage:
                 f.write(line + "\n")
 
     # ---------------- Seen cache helpers ----------------
-    def mark_as_seen(self, conn: sqlite3.Connection, pool: str) -> None:
+    def mark_as_seen(self, conn: sqlite3.Connection, chain: str, pool: str) -> None:
         conn.execute(
             """
-            INSERT INTO seen_pools(pool,last_seen_ts) VALUES(?, strftime('%s','now'))
-            ON CONFLICT(pool) DO UPDATE SET last_seen_ts=strftime('%s','now')
+            INSERT INTO seen_pools(chain,pool,seen_ts) VALUES(?,?, strftime('%s','now'))
+            ON CONFLICT(chain,pool) DO UPDATE SET seen_ts=strftime('%s','now')
             """,
-            (pool,),
+            (chain, pool),
         )
         conn.commit()
 
-    def get_recently_seen(self, conn: sqlite3.Connection, ttl_sec: int) -> set[str]:
+    def get_recently_seen(self, conn: sqlite3.Connection, chain: str, ttl_min: int) -> set[str]:
         cur = conn.execute(
             """
-            SELECT pool FROM seen_pools WHERE last_seen_ts > strftime('%s','now') - ?
+            SELECT pool FROM seen_pools 
+            WHERE chain=? AND seen_ts > strftime('%s','now') - (? * 60)
             """,
-            (int(ttl_sec),),
+            (chain, int(ttl_min)),
         )
         return {row[0] for row in cur.fetchall()}
 
     def purge_seen_older_than(self, conn: sqlite3.Connection, ttl_sec: int) -> None:
         conn.execute(
             """
-            DELETE FROM seen_pools WHERE last_seen_ts <= strftime('%s','now') - ?
+            DELETE FROM seen_pools WHERE seen_ts <= strftime('%s','now') - ?
             """,
             (int(ttl_sec),),
+        )
+        conn.commit()
+
+    # ---------------- Progress cursors ----------------
+    def get_progress(self, conn: sqlite3.Connection, chain: str, source: str) -> int:
+        cur = conn.execute(
+            "SELECT page FROM progress_cursors WHERE chain=? AND source=?",
+            (chain, source),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row else 1
+
+    def bump_progress(self, conn: sqlite3.Connection, chain: str, source: str, next_page: int) -> None:
+        conn.execute(
+            """
+            INSERT INTO progress_cursors(chain,source,page,extra,updated_ts)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(chain,source) DO UPDATE SET page=excluded.page, extra=excluded.extra, updated_ts=excluded.updated_ts
+            """,
+            (chain, source, int(next_page), None, int(time.time())),
         )
         conn.commit()

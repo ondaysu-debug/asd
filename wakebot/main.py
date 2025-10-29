@@ -5,10 +5,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-from .alerts import AlertInputs, Notifier, maybe_alert
+from .alerts import AlertInputs, Notifier, maybe_alert, build_revival_text, should_revival
 from .config import Config
-from .discovery import gt_discover_new_pairs
-from .gecko import GeckoCache, fetch_ohlcv_49h
+from .discovery import gt_discover_candidates
+from .gecko import GeckoCache, fetch_ohlcv_49h, fetch_revival_window
 from .net_http import HttpClient
 from .storage import Storage
 
@@ -25,11 +25,13 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
         print(f"Max cycles: {cfg.max_cycles}")
 
     total_scanned = 0
-    total_cands = 0
     total_filtered_tx = 0
     total_filtered_liq = 0
 
-    # discovery across chains using configured sources and pages
+    # start cycle accounting for HTTP
+    http.reset_cycle_counters()
+
+    # discovery across chains using configured sources and progress cursors
     aggregated: list[dict] = []
     if cfg.chains:
         # limit chain scan workers
@@ -37,20 +39,14 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = {}
             for chain in cfg.chains:
-                futures[pool.submit(gt_discover_new_pairs, cfg, http, chain)] = chain
+                futures[pool.submit(gt_discover_candidates, cfg, http, storage, chain, cycle_idx=cycle_idx)] = chain
             for fut in as_completed(futures):
                 chain_name = futures[fut]
                 try:
-                    items, stats = fut.result()
+                    items = fut.result()
                     aggregated.extend(items or [])
-                    # accumulate scanned pages and filter counters
-                    total_scanned += int(stats.get("pages_fetched", 0)) * int(cfg.gecko_page_size)
-                    total_filtered_tx += int(stats.get("filtered_tx", 0))
-                    total_filtered_liq += int(stats.get("filtered_liq", 0))
                 except Exception as e:
                     print(f"[{chain_name}] discovery error: {e}")
-
-    total_cands = len(aggregated)
 
     # log candidates in JSONL if enabled
     if aggregated and cfg.save_candidates:
@@ -60,10 +56,26 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
             out["ts"] = now_iso
             storage.append_jsonl(out)
 
-    # seen-cache to avoid wasting OHLCV budget on recently probed pools
+    # Compute dynamic budget for OHLCV probes
+    theoretical_cycle_budget = int(cfg.gecko_calls_per_min * (cfg.loop_seconds / 60.0))
+    spent_so_far = http.get_cycle_requests() + http.get_cycle_penalty()
+    available_for_ohlcv = max(0, theoretical_cycle_budget - spent_so_far - cfg.gecko_safety_budget)
+    ohlcv_budget = min(available_for_ohlcv, cfg.max_ohlcv_probes_cap)
+    if available_for_ohlcv > 0:
+        ohlcv_budget = max(cfg.min_ohlcv_probes, ohlcv_budget)
+    else:
+        ohlcv_budget = 0
+    print(
+        f"[budget] theoretical={theoretical_cycle_budget}, spent={spent_so_far}, "
+        f"avail_ohlcv={available_for_ohlcv}, cap={cfg.max_ohlcv_probes_cap}, final_ohlcv_budget={ohlcv_budget}"
+    )
+
+    # seen-cache per chain to avoid wasting OHLCV budget on recently probed pools
+    recently_seen_by_chain: dict[str, set[str]] = {}
     with storage.get_conn() as conn:
-        seen = storage.get_recently_seen(conn, cfg.seen_ttl_sec)
-    candidates = [m for m in aggregated if m.get("pool") not in seen]
+        for chain in cfg.chains:
+            recently_seen_by_chain[chain] = storage.get_recently_seen(conn, chain, cfg.seen_ttl_min)
+    candidates = [m for m in aggregated if m.get("pool") not in recently_seen_by_chain.get(m.get("chain"), set())]
     skipped_seen = max(0, len(aggregated) - len(candidates))
 
     # sort and cap OHLCV probes by liquidity desc then tx24h desc
@@ -75,11 +87,11 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
             ),
             reverse=True,
         )
-    selected = candidates[: cfg.max_ohlcv_probes] if cfg.max_ohlcv_probes > 0 else []
+    selected = candidates[: ohlcv_budget] if ohlcv_budget > 0 else []
 
     # parallel fetch + alerts
     if selected:
-        workers = min(len(selected), cfg.alert_fetch_workers)
+        workers = max(1, min(len(selected), cfg.alert_fetch_workers))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
             probed_total = 0
@@ -93,7 +105,33 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
                     token_addr=meta.get("baseAddr", ""),
                     liquidity=float(meta.get("liquidity", 0.0)),
                 )
-                futures[pool.submit(maybe_alert, cfg, storage, cache, http, notifier, inputs)] = inputs.pool
+                # Each worker fetches revival window and possibly sends alert
+                def _work(inp: AlertInputs, pool_created_at: str | None):
+                    # Cooldown
+                    with storage.get_conn() as conn:
+                        last = storage.get_last_alert_ts(conn, inp.pool)
+                        if last:
+                            last_dt = datetime.fromtimestamp(int(last), tz=timezone.utc)
+                            if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cfg.cooldown_min):
+                                return {"probed": True, "probed_ok": True, "alert": False}
+
+                    # Fetch window
+                    w = fetch_revival_window(cfg, http, inp.chain, inp.pool, pool_created_at)
+                    # Mark seen regardless of alert outcome
+                    with storage.get_conn() as conn:
+                        storage.mark_as_seen(conn, inp.chain, inp.pool)
+
+                    if not should_revival(w, cfg):
+                        return {"probed": True, "probed_ok": True, "alert": False}
+
+                    # Send alert and set cooldown
+                    text = build_revival_text(inp, inp.chain.capitalize(), w)
+                    notifier.send(text)
+                    with storage.get_conn() as conn:
+                        storage.set_last_alert_ts(conn, inp.pool, int(datetime.now(timezone.utc).timestamp()))
+                    return {"probed": True, "probed_ok": True, "alert": True}
+
+                futures[pool.submit(_work, inputs, meta.get("pool_created_at"))] = inputs.pool
             for fut in as_completed(futures):
                 # drain exceptions to avoid threadpool suppression
                 try:
@@ -116,8 +154,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
     print(
         f"[cycle] candidates total: {len(candidates)}, "
         f"ohlcv_probed: {probed_ok}/{probed_total}, "
-        f"skipped_seen: {skipped_seen}, "
-        f"filtered_tx: {total_filtered_tx}, filtered_liq: {total_filtered_liq}"
+        f"skipped_seen: {skipped_seen}"
     )
     # optional: scanned_total if useful
     print(f"[cycle] scanned total: {total_scanned}")
