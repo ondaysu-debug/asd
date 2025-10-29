@@ -104,7 +104,7 @@ class Config:
         max_cycles = max(0, int(os.getenv("MAX_CYCLES", "0")))
 
         # Alerting/noise reduction and seen-cache
-        alert_ratio_min = float(os.getenv("ALERT_RATIO_MIN", "1.0"))
+        alert_ratio_min = float(os.getenv("ALERT_RATIO_MIN", "1.10"))
         seen_ttl_sec = int(os.getenv("SEEN_TTL_SEC", "900"))
 
         # Logging

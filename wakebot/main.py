@@ -26,6 +26,8 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
 
     total_scanned = 0
     total_cands = 0
+    total_filtered_tx = 0
+    total_filtered_liq = 0
 
     # discovery across chains using configured sources and pages
     aggregated: list[dict] = []
@@ -39,8 +41,12 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
             for fut in as_completed(futures):
                 chain_name = futures[fut]
                 try:
-                    items = fut.result() or []
-                    aggregated.extend(items)
+                    items, stats = fut.result()
+                    aggregated.extend(items or [])
+                    # accumulate scanned pages and filter counters
+                    total_scanned += int(stats.get("pages_fetched", 0)) * int(cfg.gecko_page_size)
+                    total_filtered_tx += int(stats.get("filtered_tx", 0))
+                    total_filtered_liq += int(stats.get("filtered_liq", 0))
                 except Exception as e:
                     print(f"[{chain_name}] discovery error: {e}")
 
@@ -58,10 +64,17 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
     with storage.get_conn() as conn:
         seen = storage.get_recently_seen(conn, cfg.seen_ttl_sec)
     candidates = [m for m in aggregated if m.get("pool") not in seen]
+    skipped_seen = max(0, len(aggregated) - len(candidates))
 
-    # sort and cap OHLCV probes by liquidity desc and tx24h asc
+    # sort and cap OHLCV probes by liquidity desc then tx24h desc
     if candidates:
-        candidates.sort(key=lambda m: (float(m.get("liquidity", 0.0)), -float(m.get("tx24h", 0))), reverse=True)
+        candidates.sort(
+            key=lambda m: (
+                float(m.get("liquidity", 0.0)),
+                int(m.get("tx24h", 0)),
+            ),
+            reverse=True,
+        )
     selected = candidates[: cfg.max_ohlcv_probes] if cfg.max_ohlcv_probes > 0 else []
 
     # parallel fetch + alerts
@@ -69,6 +82,8 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
         workers = min(len(selected), cfg.alert_fetch_workers)
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
+            probed_total = 0
+            probed_ok = 0
             for meta in selected:
                 inputs = AlertInputs(
                     chain=meta["chain"],
@@ -82,16 +97,30 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
             for fut in as_completed(futures):
                 # drain exceptions to avoid threadpool suppression
                 try:
-                    fut.result()
+                    res = fut.result()
+                    probed_total += 1
+                    if isinstance(res, dict) and res.get("probed_ok"):
+                        probed_ok += 1
                 except Exception as e:
                     pid = futures[fut]
                     print(f"[alert] {pid} error: {e}")
+    else:
+        probed_total = 0
+        probed_ok = 0
 
     # purge old seen entries
     with storage.get_conn() as conn:
         storage.purge_seen_older_than(conn, cfg.seen_ttl_sec)
 
-    print(f"[cycle] scanned total: {total_scanned}, candidates total: {total_cands}")
+    # cycle summary
+    print(
+        f"[cycle] candidates total: {len(candidates)}, "
+        f"ohlcv_probed: {probed_ok}/{probed_total}, "
+        f"skipped_seen: {skipped_seen}, "
+        f"filtered_tx: {total_filtered_tx}, filtered_liq: {total_filtered_liq}"
+    )
+    # optional: scanned_total if useful
+    print(f"[cycle] scanned total: {total_scanned}")
 
 
 def pick_sources(cfg: Config, cycle_idx: int) -> list[str]:

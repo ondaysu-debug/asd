@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Tuple
 
@@ -48,7 +49,7 @@ class Notifier:
 
 
 def should_alert(vol1h: float, prev48h: float, ratio_min: float) -> bool:
-    return vol1h > 0.0 and prev48h > 0.0 and (vol1h > prev48h * max(0.0, float(ratio_min)))
+    return vol1h > 0.0 and prev48h > 0.0 and (vol1h > prev48h * float(ratio_min))
 
 
 def get_window_stats(
@@ -89,15 +90,15 @@ def maybe_alert(
         # Use window stats from GeckoTerminal OHLCV
         ws = get_window_stats(cfg, http, cache, meta)
         if ws is None:
-            return
+            return {"probed": True, "probed_ok": False, "alert": False}
         vol1h, prev48h, source_tag = ws
         # Mark as seen regardless of alert outcome to avoid repeated OHLCV probes within TTL
         storage.mark_as_seen(conn, meta.pool)
         if prev48h <= 0:
-            return
+            return {"probed": True, "probed_ok": False, "alert": False}
 
         if not should_alert(vol1h, prev48h, cfg.alert_ratio_min):
-            return
+            return {"probed": True, "probed_ok": True, "alert": False}
 
         storage.set_last_alert_ts(conn, meta.pool, int(datetime.now(timezone.utc).timestamp()))
 
@@ -117,6 +118,7 @@ def maybe_alert(
         f"Link: {_escape_md(meta.url)}"
     )
     notifier.send(text)
+    return {"probed": True, "probed_ok": True, "alert": True}
 
 
 def _nice(x: float | int | None) -> str:
@@ -133,8 +135,8 @@ def _nice(x: float | int | None) -> str:
         return "n/a"
 
 
-_MD_ESC = str.maketrans({"_": r"\_", "*": r"\*", "`": r"\`", "[": r"\[", "]": r"\]", "(": r"\(", ")": r"\)"})
+_MD_RE = re.compile(r"([_*\[\]()~`>#+\-=|{}.!])")
 
 
 def _escape_md(s: str) -> str:
-    return s.translate(_MD_ESC) if s else s
+    return _MD_RE.sub(r"\\\1", s or "")
