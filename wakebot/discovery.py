@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple
 
 from .config import Config
 from .filters import is_base_token_acceptable, is_token_native_pair, pool_data_filters
+from .cmc import _validate_cmc_pairs_doc
 from .gecko import _normalize_gt_chain
 from .net_http import HttpClient
 
@@ -302,11 +303,17 @@ def cmc_discover_by_source(
     out: list[dict] = []
     scanned_pairs = 0
     pages_done = 0
+    invalid_pages = 0
 
     def _fetch_page(url: str) -> list[dict]:
         nonlocal scanned_pairs, pages_done
         try:
             doc = http.cmc_get_json(url, timeout=20.0) or {}
+            if not _validate_cmc_pairs_doc(doc):
+                print(f"[cmc][validate] unexpected discovery schema; skipping page {page}")
+                pages_done += 1
+                invalid_pages += 1
+                return []
         except Exception as e:
             print(f"[{chain}] CMC {s} error: {e}")
             pages_done += 1
@@ -390,7 +397,7 @@ def cmc_discover_by_source(
         pid = it.get("pool")
         if pid and pid not in dedup:
             dedup[pid] = it
-    return list(dedup.values()), {"pages_done": pages_done, "scanned_pairs": scanned_pairs}
+    return list(dedup.values()), {"pages_done": pages_done, "scanned_pairs": scanned_pairs, "validation_errors": invalid_pages}
 
 
 def cmc_discover_candidates(

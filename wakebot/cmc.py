@@ -1,11 +1,43 @@
 from __future__ import annotations
 
 from typing import Tuple
+import random
 from datetime import datetime, timedelta, timezone
 
 from .config import Config
 from .net_http import HttpClient
 from .gecko import GeckoCache
+
+
+def _validate_cmc_pairs_doc(doc: dict) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    data = doc.get("data")
+    if not isinstance(data, list):
+        return False
+    for item in data:
+        if not isinstance(item, dict):
+            return False
+        has_id = any(k in item for k in ("pair_address", "id", "pairId"))
+        if not has_id:
+            return False
+    return True
+
+
+def _validate_cmc_ohlcv_doc(doc: dict) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    data = doc.get("data")
+    if not data:
+        return False
+    attrs = (data.get("attributes") or {}) if isinstance(data, dict) else {}
+    candles = attrs.get("candles") or attrs.get("ohlcv_list")
+    if not isinstance(candles, list):
+        return False
+    for c in candles:
+        if not (isinstance(c, list) and len(c) >= 6):
+            return False
+    return True
 
 
 def _parse_ts(ts_val) -> datetime | None:
@@ -51,6 +83,9 @@ def fetch_cmc_ohlcv_25h(
 
     try:
         doc = http.cmc_get_json(url, timeout=20.0) or {}
+        if not _validate_cmc_ohlcv_doc(doc):
+            print(f"[cmc][validate] unexpected ohlcv schema for pair={pool_id}; fallback? {cfg.allow_gt_ohlcv_fallback}")
+            raise ValueError("invalid ohlcv schema")
         attrs = ((doc.get("data") or {}).get("attributes") or {}) if isinstance(doc.get("data"), dict) else {}
         # Accept several shapes
         candles = (
@@ -103,6 +138,25 @@ def fetch_cmc_ohlcv_25h(
             ok_age = (now_dt - first_dt) >= timedelta(days=int(cfg.revival_min_age_days))
 
         cache.set(key, (vol1h, prev24h))
+
+        # Optional data-quality probe (~5%): compare CMC vs GT when fallback allowed
+        try:
+            if cfg.allow_gt_ohlcv_fallback and random.random() < 0.05:
+                from .gecko import fetch_gt_ohlcv_25h as _gt_25h
+                v1_gt, p24_gt = _gt_25h(cfg, http, chain, pool_id, cache)
+                dv1 = abs(vol1h - v1_gt)
+                dv1_rel = dv1 / max(1.0, vol1h)
+                dprev = abs(prev24h - p24_gt)
+                dprev_rel = dprev / max(1.0, prev24h)
+                print(
+                    f"[dq] {chain}/{pool_id} v1h CMC={vol1h:.2f} GT={v1_gt:.2f} Δ={dv1:.2f} ({dv1_rel:.1%}); "
+                    f"prev24 CMC={prev24h:.2f} GT={p24_gt:.2f} Δ={dprev:.2f} ({dprev_rel:.1%})"
+                )
+                if dv1_rel > 0.25 or dprev_rel > 0.25:
+                    print(f"[dq][warn] discrepancy >25% for {chain}/{pool_id}")
+        except Exception:
+            pass
+
         return vol1h, prev24h, ok_age, "CMC DEX"
     except Exception:
         if cfg.allow_gt_ohlcv_fallback:

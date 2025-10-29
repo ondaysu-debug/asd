@@ -74,6 +74,11 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
         ohlcv_budget = max(cfg.min_ohlcv_probes, ohlcv_budget)
     else:
         ohlcv_budget = 0
+    # ensure integer for slicing/worker counts
+    try:
+        ohlcv_budget = int(ohlcv_budget)
+    except Exception:
+        ohlcv_budget = 0
     print(
         f"[budget] total={total_budget}, discovery_cost={discovery_cost}, spent={spent_so_far}, "
         f"avail_ohlcv={available_for_ohlcv}, cap={cfg.max_ohlcv_probes_cap}, final_ohlcv_budget={ohlcv_budget}"
@@ -178,9 +183,31 @@ def run_once(cfg: Config, *, cycle_idx: int) -> None:
         alerts_cnt = int(alerts_by_chain.get(chain, 0))
         print(f"[cycle] {chain}: scanned={scanned_cnt}, candidates={cand_cnt}, ohlcv_probes={probes}, alerts={alerts_cnt}")
 
+    # rate-limit summary
+    try:
+        print(
+            f"[rate] req={http.get_cycle_requests()} 429={http.get_cycle_429()} penalty={http.get_cycle_penalty():.2f}s rps≈{http.get_effective_rps():.2f}"
+        )
+    except Exception:
+        pass
+
     # overall summary
     used = len(selected)
     print(f"[cycle] total scanned: {total_scanned} pools; OHLCV used: {used}/{ohlcv_budget}")
+
+    # health-like summary for the cycle
+    try:
+        pages_planned = sum(int((per_chain_stats.get(ch, {}) or {}).get("pages_planned", 0)) for ch in (cfg.chains or []))
+        pages_done = sum(int((per_chain_stats.get(ch, {}) or {}).get("pages_done", 0)) for ch in (cfg.chains or []))
+        validation_errors = sum(int((per_chain_stats.get(ch, {}) or {}).get("validation_errors", 0)) for ch in (cfg.chains or []))
+        ok_flag = (validation_errors == 0)
+        msg = (
+            f"[health] ok={'true' if ok_flag else 'false'} discovery_pages={pages_done}/{pages_planned} "
+            f"scanned={total_scanned} ohlcv_used={used}/{ohlcv_budget}"
+        )
+        print(msg)
+    except Exception:
+        pass
 
 
 def pick_sources(cfg: Config, cycle_idx: int) -> list[str]:
@@ -188,12 +215,64 @@ def pick_sources(cfg: Config, cycle_idx: int) -> list[str]:
     return cfg.gecko_sources_list or ["new"]
 
 
+def health_check(cfg: Config, http: HttpClient, logger=print) -> bool:
+    """
+    Быстрый самотест: проверяем доступность CMC discovery и OHLCV (v4 paths).
+    Адаптирует базу: если cfg.cmc_dex_base оканчивается на /dexer/v3, используем корень pro-api для /v4/ путей.
+    Возвращает True/False и печатает краткий отчёт.
+    """
+    ok = True
+    try:
+        chain = (cfg.chains or ["ethereum"])[0]
+        cmc_chain = (cfg.chain_slugs or {}).get(chain, chain)
+
+        base = (cfg.cmc_dex_base or "").rstrip("/")
+        # adapt base to root for v4 paths when configured for dexer/v3
+        if "/dexer/" in base:
+            root = base.split("/dexer/", 1)[0]
+        else:
+            root = base
+
+        disc_url = f"{root}/v4/dex/spot-pairs/latest"
+        doc = http.cmc_get_json(disc_url, params={"chain_slug": cmc_chain, "limit": 5, "page": 1}, timeout=10.0) or {}
+        ok = ok and bool(doc)
+        logger(f"[health] discovery on {chain}/{cmc_chain}: {'OK' if doc else 'FAIL'}")
+
+        # Try to extract a pair id/address
+        pair_id = None
+        try:
+            data = (doc or {}).get("data") or []
+            if data:
+                first = data[0]
+                pair_id = first.get("pair_address") or first.get("id") or first.get("pairId")
+        except Exception:
+            pair_id = None
+
+        if pair_id:
+            ohlcv_url = f"{root}/v4/dex/pairs/ohlcv/latest"
+            ohlcv = http.cmc_get_json(ohlcv_url, params={"pair_address": pair_id, "timeframe": "1h", "aggregate": 1, "limit": 2}, timeout=10.0) or {}
+            ok = ok and bool(ohlcv)
+            logger(f"[health] ohlcv for {pair_id}: {'OK' if ohlcv else 'FAIL'}")
+        else:
+            logger("[health] skip ohlcv: no pair_id from discovery")
+    except Exception as e:
+        logger(f"[health] error: {e}")
+        ok = False
+    return ok
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="run single cycle and exit")
+    parser.add_argument("--health", action="store_true", help="run health check and exit 0/1")
     args = parser.parse_args(argv)
 
     cfg = Config.load()
+
+    if args.health:
+        http = HttpClient(cfg)
+        ok = health_check(cfg, http)
+        raise SystemExit(0 if ok else 1)
 
     cycle_idx = 0
     if args.once:

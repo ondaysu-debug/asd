@@ -30,7 +30,9 @@ class HttpClient:
         # per-cycle accounting
         self._cycle_started_at = time.monotonic()
         self._cycle_requests = 0
-        self._cycle_penalty = 0
+        self._cycle_penalty = 0.0
+        self._cycle_429 = 0
+        self._rps_effective = 0.0
 
         # global rate limiter for GeckoTerminal (public rate ~<30/min)
         base_rps = max(0.0, float(cfg.gecko_calls_per_min) / 60.0)
@@ -70,19 +72,34 @@ class HttpClient:
     def reset_cycle_counters(self) -> None:
         self._cycle_started_at = time.monotonic()
         self._cycle_requests = 0
-        self._cycle_penalty = 0
+        self._cycle_penalty = 0.0
+        self._cycle_429 = 0
+        # report CMC effective RPS at cycle start
+        try:
+            self._rps_effective = float(self._cmc_limiter.get_rate())
+        except Exception:
+            self._rps_effective = 0.0
 
     def get_cycle_requests(self) -> int:
         return int(self._cycle_requests)
 
-    def add_penalty(self, n: int = 1) -> None:
+    def add_penalty(self, seconds: float) -> None:
         try:
-            self._cycle_penalty += int(n)
+            self._cycle_penalty += float(seconds)
         except Exception:
-            self._cycle_penalty += 1
+            self._cycle_penalty += 0.0
 
     def get_cycle_penalty(self) -> int:
-        return int(self._cycle_penalty)
+        try:
+            return float(self._cycle_penalty)  # type: ignore[return-value]
+        except Exception:
+            return 0.0  # type: ignore[return-value]
+
+    def get_cycle_429(self) -> int:
+        return int(self._cycle_429)
+
+    def get_effective_rps(self) -> float:
+        return float(self._rps_effective)
 
     def _build_session(self) -> requests.Session:
         session = requests.Session()
@@ -112,31 +129,41 @@ class HttpClient:
         return session
 
     # ----- GeckoTerminal with throttling -----
-    def gt_get_json(self, url: str, timeout: float = 20.0) -> dict[str, Any]:
+    def gt_get_json(self, url: str, params: Optional[dict[str, Any]] = None, timeout: float = 20.0) -> dict[str, Any]:
         # acquire limiter: may need to sleep based on tokens
         sleep_for = self._limiter.acquire()
         if sleep_for > 0:
             self._log(f"[gt] throttling sleep {sleep_for:.3f}s @ rate={self._limiter.get_rate():.2f}")
-            time.sleep(min(sleep_for, 5.0))
+            slept = min(sleep_for, 5.0)
+            time.sleep(slept)
+            self.add_penalty(slept)
         try:
-            r = self._session().get(url, timeout=timeout)
+            r = self._session().get(url, params=params, timeout=timeout)
             status = r.status_code
             self._limiter.record_status(status)
+            # update effective RPS estimate on any record
+            try:
+                self._rps_effective = float(self._cmc_limiter.get_rate())
+            except Exception:
+                pass
 
             # Respect Retry-After
             if status == 429:
+                self._cycle_429 += 1
                 retry_after_hdr = r.headers.get("Retry-After")
                 if retry_after_hdr:
                     sleep_s = _parse_retry_after(retry_after_hdr)
                     if sleep_s is not None and sleep_s > 0:
                         cap = max(0.0, self._cfg.gecko_retry_after_cap_s)
                         self._log(f"[gt] 429 Retry-After {sleep_s:.3f}s (cap {cap:.3f}s)")
-                        time.sleep(min(sleep_s, cap))
-                # count penalty for dynamic budget
-                self.add_penalty(1)
+                        slept = min(sleep_s, cap)
+                        time.sleep(slept)
+                        self.add_penalty(slept)
+                # count a small fixed penalty even without header
+                self.add_penalty(0.5)
             # brief success/error log (avoid logging secrets; only URL and sizes)
             try:
-                self._log(f"[gt] GET {url} -> {status} bytes={len(r.content)}")
+                self._log(f"[gt] GET {r.url or url} -> {status} bytes={len(r.content)}")
             except Exception:
                 pass
             r.raise_for_status()
@@ -153,31 +180,41 @@ class HttpClient:
                 self._cycle_requests = int(self._cycle_requests) + 1
 
     # ----- CMC DEX with throttling and API key -----
-    def cmc_get_json(self, url: str, timeout: float = 20.0) -> dict[str, Any]:
+    def cmc_get_json(self, url: str, params: Optional[dict[str, Any]] = None, timeout: float = 20.0) -> dict[str, Any]:
         # acquire limiter: may need to sleep based on tokens
         sleep_for = self._cmc_limiter.acquire()
         if sleep_for > 0:
             self._log(f"[cmc] throttling sleep {sleep_for:.3f}s @ rate={self._cmc_limiter.get_rate():.2f}")
-            time.sleep(min(sleep_for, 5.0))
+            slept = min(sleep_for, 5.0)
+            time.sleep(slept)
+            self.add_penalty(slept)
         try:
             session = self._session()
             # ensure header on each request
             if self._cfg.cmc_api_key:
                 session.headers["X-CMC_PRO_API_KEY"] = self._cfg.cmc_api_key
-            r = session.get(url, timeout=timeout)
+            r = session.get(url, params=params, timeout=timeout)
             status = r.status_code
             self._cmc_limiter.record_status(status)
+            try:
+                self._rps_effective = float(self._cmc_limiter.get_rate())
+            except Exception:
+                pass
 
             # Respect Retry-After for 429
             if status == 429:
+                self._cycle_429 += 1
                 retry_after_hdr = r.headers.get("Retry-After")
                 if retry_after_hdr:
                     sleep_s = _parse_retry_after(retry_after_hdr)
                     if sleep_s is not None and sleep_s > 0:
                         cap = max(0.0, self._cfg.cmc_retry_after_cap_s)
                         self._log(f"[cmc] 429 Retry-After {sleep_s:.3f}s (cap {cap:.3f}s)")
-                        time.sleep(min(sleep_s, cap))
-                self.add_penalty(1)
+                        slept = min(sleep_s, cap)
+                        time.sleep(slept)
+                        self.add_penalty(slept)
+                # count a small fixed penalty even without header
+                self.add_penalty(0.5)
 
             # If unauthorized/forbidden or persistent 404, try ALT base once
             if status in (401, 403) or status == 404:
@@ -189,12 +226,12 @@ class HttpClient:
                 if try_alt:
                     alt_url = url.replace(base, alt, 1)
                     self._log(f"[cmc] retry via ALT base: {alt_url}")
-                    r = session.get(alt_url, timeout=timeout)
+                    r = session.get(alt_url, params=params, timeout=timeout)
                     status = r.status_code
                     self._cmc_limiter.record_status(status)
             # brief success/error log (avoid logging secrets; only URL and sizes)
             try:
-                self._log(f"[cmc] GET {url} -> {status} bytes={len(r.content)}")
+                self._log(f"[cmc] GET {r.url or url} -> {status} bytes={len(r.content)}")
             except Exception:
                 pass
             r.raise_for_status()
