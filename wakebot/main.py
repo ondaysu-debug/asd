@@ -9,7 +9,7 @@ from .alerts import AlertInputs, Notifier, maybe_alert
 from .config import Config
 from .discovery import ds_search_native_pairs
 from .gecko import GeckoCache
-from .http import HttpClient
+from .net_http import HttpClient
 from .storage import Storage
 
 

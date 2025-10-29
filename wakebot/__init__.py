@@ -1,5 +1,5 @@
 from .config import Config
-from .http import HttpClient
+from .net_http import HttpClient
 from .gecko import GeckoCache
 from .alerts import Notifier, AlertInputs, should_alert
 from .rate_limit import DexscreenerLimiter, AdaptiveParams
