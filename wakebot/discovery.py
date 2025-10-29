@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from .config import Config
 from .filters import is_base_token_acceptable, is_token_native_pair, pool_data_filters
@@ -17,7 +17,9 @@ def _source_to_endpoint(source: str) -> str:
     return s  # allow raw values like "pools"
 
 
-def gt_fetch_page(cfg: Config, http: HttpClient, chain: str, source: str, page: int) -> list[dict]:
+def gt_fetch_page(
+    cfg: Config, http: HttpClient, chain: str, source: str, page: int
+) -> Tuple[list[dict], Dict[str, int]]:
     gt_chain = _normalize_gt_chain(chain)
     endpoint = _source_to_endpoint(source)
     url = (
@@ -28,7 +30,8 @@ def gt_fetch_page(cfg: Config, http: HttpClient, chain: str, source: str, page: 
         doc = http.gt_get_json(url, timeout=20.0) or {}
     except Exception as e:
         print(f"[{chain}] {endpoint} page {page} error: {e}")
-        return []
+        # one page attempt, zero candidates, no filters counted
+        return [], {"filtered_liq": 0, "filtered_tx": 0, "pages_fetched": 1}
 
     data = doc.get("data") or []
     included = doc.get("included") or []
@@ -39,6 +42,8 @@ def gt_fetch_page(cfg: Config, http: HttpClient, chain: str, source: str, page: 
     }
 
     out: list[dict] = []
+    filtered_liq = 0
+    filtered_tx = 0
     seen: set[str] = set()
     for pool in data:
         if (pool.get("type") or "").lower() != "pool":
@@ -65,7 +70,15 @@ def gt_fetch_page(cfg: Config, http: HttpClient, chain: str, source: str, page: 
         liquidity = float(attr.get("reserve_in_usd") or 0.0)
         tx24 = (attr.get("transactions") or {}).get("h24") or {}
         tx24h = int((tx24.get("buys") or 0) + (tx24.get("sells") or 0))
-        if not pool_data_filters(liquidity, cfg.liquidity_min, cfg.liquidity_max, tx24h, cfg.tx24h_max):
+
+        # count filter reasons (after TOKEN/native + base acceptance)
+        failed_liq = not (cfg.liquidity_min <= liquidity <= cfg.liquidity_max)
+        failed_tx = tx24h > cfg.tx24h_max
+        if failed_liq or failed_tx:
+            if failed_liq:
+                filtered_liq += 1
+            if failed_tx:
+                filtered_tx += 1
             continue
 
         out.append(
@@ -82,20 +95,31 @@ def gt_fetch_page(cfg: Config, http: HttpClient, chain: str, source: str, page: 
             }
         )
 
-    return out
+    return out, {"filtered_liq": filtered_liq, "filtered_tx": filtered_tx, "pages_fetched": 1}
 
 
-def gt_discover_new_pairs(cfg: Config, http: HttpClient, chain: str) -> list[dict]:
+def gt_discover_new_pairs(cfg: Config, http: HttpClient, chain: str) -> Tuple[list[dict], Dict[str, int]]:
     """
     Discover TOKEN/native pools from GeckoTerminal using configured sources and pages.
     Sources: values from cfg.gecko_sources (comma-separated), supporting "new", "trending" (and raw "pools").
     Pages: 1..cfg.gecko_pages_per_chain for each source.
     """
     out: list[dict] = []
+    stats = {"filtered_liq": 0, "filtered_tx": 0, "pages_fetched": 0}
     sources = cfg.gecko_sources_list or ["new"]
     for source in sources:
         for page in range(1, cfg.gecko_pages_per_chain + 1):
-            items = gt_fetch_page(cfg, http, chain, source, page)
+            items, st = gt_fetch_page(cfg, http, chain, source, page)
+            stats["filtered_liq"] += st.get("filtered_liq", 0)
+            stats["filtered_tx"] += st.get("filtered_tx", 0)
+            stats["pages_fetched"] += st.get("pages_fetched", 0)
             if items:
                 out.extend(items)
-    return out
+
+    # per-chain discovery summary
+    print(
+        f"[{chain}] sources={cfg.gecko_sources} "
+        f"pages={cfg.gecko_pages_per_chain} page_size={cfg.gecko_page_size} "
+        f"-> candidates={len(out)}"
+    )
+    return out, stats
