@@ -9,6 +9,7 @@ from .alerts import AlertInputs, Notifier, maybe_alert
 from .config import Config
 from .discovery import ds_search_native_pairs
 from .gecko import GeckoCache
+from .onchain import fetch_onchain_pool_stats
 from .net_http import HttpClient
 from .storage import Storage
 
@@ -61,7 +62,7 @@ def run_once(cfg: Config) -> None:
             out["ts"] = now_iso
             storage.append_jsonl(out)
 
-    # prefetch Gecko for candidates that already pass DS precheck
+    # prefetch window stats for candidates that already pass DS precheck
     prechecked: list[dict] = []
     for meta in aggregated:
         v1 = float(meta.get("vol1h_ds") or 0.0)
@@ -74,7 +75,7 @@ def run_once(cfg: Config) -> None:
         workers = min(len(prechecked), cfg.alert_fetch_workers)
         if workers:
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {pool.submit(_fetch_gecko_wrapped, cfg, http, cache, m): m for m in prechecked}
+                futures = {pool.submit(_fetch_window_wrapped, cfg, http, cache, m): m for m in prechecked}
                 for fut in as_completed(futures):
                     m = futures[fut]
                     try:
@@ -85,9 +86,16 @@ def run_once(cfg: Config) -> None:
     for meta in prechecked:
         g = meta.get("_gecko_data")
         def fetch_gecko(chain: str, pool: str):
+            # Prefer prefetched
             if g is not None:
                 return g
-            # fallback
+            try:
+                if cfg.onchain_provider == "coingecko":
+                    return fetch_onchain_pool_stats(chain, pool)
+            except Exception as e:
+                print(f"[onchain] fallback to DexScreener for {chain}/{pool}: {e}")
+                return (0.0, 0, 0.0)
+            # fallback to GeckoTerminal metrics
             from .gecko import fetch_gecko_metrics
             return fetch_gecko_metrics(cfg, http, chain, pool, cache)
 
@@ -107,7 +115,14 @@ def run_once(cfg: Config) -> None:
     print(f"[cycle] scanned total: {total_scanned}, candidates total: {total_cands}, took {elapsed:.2f}s")
 
 
-def _fetch_gecko_wrapped(cfg: Config, http: HttpClient, cache: GeckoCache, meta: dict):
+def _fetch_window_wrapped(cfg: Config, http: HttpClient, cache: GeckoCache, meta: dict):
+    try:
+        if cfg.onchain_provider == "coingecko":
+            return fetch_onchain_pool_stats(meta["chain"], meta["pool"])
+    except Exception as e:
+        print(f"[onchain] fallback to DexScreener for {meta['chain']}/{meta['pool']}: {e}")
+        return (0.0, 0, 0.0)
+    # fallback to GeckoTerminal
     from .gecko import fetch_gecko_metrics
     return fetch_gecko_metrics(cfg, http, meta["chain"], meta["pool"], cache)
 

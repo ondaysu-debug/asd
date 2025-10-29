@@ -71,6 +71,13 @@ class Config:
     # Database
     db_path: Path
 
+    # On-chain (CoinGecko public REST)
+    cg_onchain_base: str = "https://api.coingecko.com/api/v3"
+    cg_api_key: str = ""
+    cg_timeout_sec: int = 20
+    cg_ttl_sec: int = 60
+    onchain_provider: str = "coingecko"
+
     @staticmethod
     def load(env_path: str | None = None, override: bool = True) -> "Config":
         load_dotenv(dotenv_path=env_path, override=override)
@@ -81,6 +88,13 @@ class Config:
 
         dexscreener_base = os.getenv("DEXSCREENER_BASE", "https://api.dexscreener.com/latest/dex")
         gecko_base = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2")
+
+        # CoinGecko On-Chain (public REST)
+        cg_onchain_base = os.getenv("CG_ONCHAIN_BASE", "https://api.coingecko.com/api/v3")
+        cg_api_key = os.getenv("CG_API_KEY", "")
+        cg_timeout_sec = int(os.getenv("CG_TIMEOUT_SEC", "20"))
+        cg_ttl_sec = int(os.getenv("CG_TTL_SEC", "60"))
+        onchain_provider = (os.getenv("ONCHAIN_PROVIDER", "coingecko") or "coingecko").strip().lower()
 
         market_cap_min = float(os.getenv("MARKET_CAP_MIN", "50000"))
         market_cap_max = float(os.getenv("MARKET_CAP_MAX", "800000"))
@@ -150,6 +164,11 @@ class Config:
             bucket_search_workers=bucket_search_workers,
             bucket_retry_limit=bucket_retry_limit,
             gecko_ttl_sec=gecko_ttl_sec,
+            cg_onchain_base=cg_onchain_base,
+            cg_api_key=cg_api_key,
+            cg_timeout_sec=cg_timeout_sec,
+            cg_ttl_sec=cg_ttl_sec,
+            onchain_provider=onchain_provider,
             ds_calls_per_sec_base=ds_calls_per_sec_base,
             ds_calls_per_sec_min=ds_calls_per_sec_min,
             ds_max_concurrency=ds_max_concurrency,

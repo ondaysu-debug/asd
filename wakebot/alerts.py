@@ -53,6 +53,33 @@ def should_alert(vol1h: float, vol48h: float) -> bool:
     return vol1h > 0.0 and vol1h > prev48
 
 
+def get_window_stats(
+    cfg: Config,
+    meta: AlertInputs,
+    fetch_window: Callable[[str, str], Tuple[float, int, float]],
+) -> Tuple[float, int, float, str] | None:
+    """
+    Пытается получить (vol1h, tx1h, vol48h, source_tag).
+    1) Пробуем REST-провайдер (оборачивается вызывающим кодом)
+    2) При ошибке или нулях: fallback на DexScreener-поля из meta (vol1h_ds/vol48h_ds)
+    """
+    try:
+        vol1h, tx1h, vol48h = fetch_window(meta.chain, meta.pool)
+    except Exception as e:
+        print(f"[onchain] fallback to DexScreener for {meta.chain}/{meta.pool}: {e}")
+        vol1h, tx1h, vol48h = (0.0, 0, 0.0)
+
+    if (vol1h, tx1h, vol48h) != (0.0, 0, 0.0):
+        return vol1h, tx1h, vol48h, "CoinGeckoREST"
+
+    # Fallback to DexScreener metrics from discovery candidate
+    vol1h = float(meta.ds_vol1h or 0.0)
+    vol48h = float(meta.ds_vol48h or 0.0)
+    if vol1h <= 0 and vol48h <= 0:
+        return None
+    return vol1h, 0, vol48h, "DexScreener"
+
+
 def maybe_alert(
     cfg: Config,
     storage: Storage,
@@ -69,15 +96,13 @@ def maybe_alert(
             if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cfg.cooldown_min):
                 return
 
-        # Gecko first, then fallback on Dexscreener values
-        vol1h, tx1h, vol48h = fetch_gecko(meta.chain, meta.pool)
-        gecko_failed = (vol1h, tx1h, vol48h) == (0.0, 0, 0.0)
-        if gecko_failed:
-            vol1h, vol48h = meta.ds_vol1h, meta.ds_vol48h
-            if vol1h <= 0 and vol48h <= 0:
-                return
-            if vol48h <= 0:
-                return
+        # Use window stats from REST provider with DexScreener fallback
+        ws = get_window_stats(cfg, meta, fetch_gecko)
+        if ws is None:
+            return
+        vol1h, tx1h, vol48h, source_tag = ws
+        if vol48h <= 0:
+            return
 
         if not should_alert(vol1h, vol48h):
             return
@@ -86,7 +111,7 @@ def maybe_alert(
 
     prev48 = max(vol48h - vol1h, 0.0)
     ratio = (vol1h / prev48) if prev48 > 0 else float("inf")
-    source_tag = "Gecko" if not gecko_failed else "DexScreener"
+    # source_tag provided by get_window_stats
 
     text = (
         f"🚨 WAKE-UP ({meta.chain.capitalize()})\n"
