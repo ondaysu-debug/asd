@@ -37,7 +37,6 @@ class Config:
 
     # Discovery sources and breadth
     gecko_sources: str
-    gecko_source_mode: str
     gecko_pages_per_chain: int
     gecko_page_size: int
 
@@ -50,6 +49,12 @@ class Config:
     chain_scan_workers: int
     alert_fetch_workers: int
     max_cycles: int
+
+    # Alerting and noise reduction
+    alert_ratio_min: float
+
+    # Seen-cache for OHLCV budget saving
+    seen_ttl_sec: int
 
     # Logging candidates
     save_candidates: bool
@@ -85,7 +90,6 @@ class Config:
 
         # Sources
         gecko_sources = os.getenv("GECKO_SOURCES", "new,trending")
-        gecko_source_mode = os.getenv("GECKO_SOURCE_MODE", "rotate")
         gecko_pages_per_chain = int(os.getenv("GECKO_PAGES_PER_CHAIN", "3"))
         gecko_page_size = int(os.getenv("GECKO_PAGE_SIZE", "100"))
 
@@ -98,6 +102,10 @@ class Config:
         chain_scan_workers = max(1, int(os.getenv("CHAIN_SCAN_WORKERS", "4")))
         alert_fetch_workers = max(1, int(os.getenv("ALERT_FETCH_WORKERS", "8")))
         max_cycles = max(0, int(os.getenv("MAX_CYCLES", "0")))
+
+        # Alerting/noise reduction and seen-cache
+        alert_ratio_min = float(os.getenv("ALERT_RATIO_MIN", "1.0"))
+        seen_ttl_sec = int(os.getenv("SEEN_TTL_SEC", "900"))
 
         # Logging
         save_candidates = _as_bool(os.getenv("SAVE_CANDIDATES", "true"))
@@ -119,7 +127,6 @@ class Config:
             gecko_retry_after_cap_s=gecko_retry_after_cap_s,
             gecko_ttl_sec=gecko_ttl_sec,
             gecko_sources=gecko_sources,
-            gecko_source_mode=gecko_source_mode,
             gecko_pages_per_chain=gecko_pages_per_chain,
             gecko_page_size=gecko_page_size,
             max_ohlcv_probes=max_ohlcv_probes,
@@ -128,6 +135,8 @@ class Config:
             chain_scan_workers=chain_scan_workers,
             alert_fetch_workers=alert_fetch_workers,
             max_cycles=max_cycles,
+            alert_ratio_min=alert_ratio_min,
+            seen_ttl_sec=seen_ttl_sec,
             save_candidates=save_candidates,
             candidates_path=candidates_path,
             db_path=db_path,

@@ -1,34 +1,31 @@
 ## WakeBot - Crypto Token Alert Bot
 
-A reliable bot that discovers TOKEN/native pools across Base, Solana, and Ethereum using Dexscreener, fetches on-chain metrics from CoinGecko On-Chain (public REST), and triggers Telegram alerts when the last 1h volume exceeds the previous 48h volume (excluding the current hour).
+Reliable TOKEN/native discovery and alerts using the public GeckoTerminal API only (no Pro). Scans Base, Solana, and Ethereum, filters noise, fetches precise OHLCV windows, and sends Telegram notifications when the last 1h volume outpaces the previous 48h window.
 
 ### Features
-- **Discovery:**
-  - Scan Dexscreener `pairs/{chain}/{dex}` for broad coverage
-  - Fallback bucketed search using `/search?q=<native_addr> <bucket>`
-  - Configurable DEX lists, buckets, retries, and breadth
+- **Discovery (GeckoTerminal):**
+  - Scan `new_pools` and `trending_pools` per chain
+  - Optional raw `pools` endpoint supported via `GECKO_SOURCES=pools`
+  - Normalizes to TOKEN/native pairs (WETH on EVM, SOL on Solana)
 - **Filtering:**
   - Normalize addresses by chain
   - Convert to TOKEN/native (WETH on EVM, SOL on Solana)
   - Exclude majors/mimics by symbol/addresses
-  - Filter by FDV range and tx24h max
-- **Metrics:**
-  - Pull `volume_usd.h1/h48` and `transactions.h1` from CoinGecko On-Chain (REST)
-  - TTL cache (thread-safe)
-  - Fallback on Dexscreener volumes if CoinGecko REST returns no data (no alert if vol48h == 0)
+  - Filter by liquidity range and `tx24h` max
+- **Metrics (GeckoTerminal OHLCV only):**
+  - Fetch 49 hourly candles per pool (`/ohlcv/hour?limit=49`)
+  - Derive `vol1h` (last candle) and `prev48h` (sum of previous candles)
+  - TTL cache for OHLCV results
 - **Alerts:**
-  - Rule: `vol1h > max(vol48h - vol1h, 0)`
+  - Rule: `vol1h > prev48h * ALERT_RATIO_MIN` (default 1.0)
   - Per-pool cooldown in SQLite
-  - Telegram notifications (Markdown)
-- **Rate limiting (Dexscreener):**
-  - Global token-bucket (tokens/sec = EFFECTIVE_RPS, capacity = EFFECTIVE_RPS)
-  - Global semaphore for max concurrency
-  - Adaptive RPS control based on recent 429 ratio (window)
+  - Telegram notifications with Markdown escaping for dynamic fields
+- **Rate limiting (GeckoTerminal):**
+  - Global token-bucket with adaptive RPS control and max concurrency
   - Respects `Retry-After` (seconds or HTTP-date) with configurable cap
-  - Informative logs for throttling and adaptation
+  - 5xx retries (2 attempts) with small backoff
 - **Concurrency:**
-  - Multi-threaded scanning per chain
-  - Controlled parallelism for Gecko prefetch
+  - Multi-threaded chain scanning and alert fetch
 - **Logging:**
   - Candidates logged to JSONL with timestamps
 - **Resilience:**
@@ -65,62 +62,57 @@ python -m wakebot          # continuous
 ```
 
 ### Configuration (.env)
-See `.env.example` for all variables. Key ones:
-- **Telegram:** `TG_BOT_TOKEN`, `TG_CHAT_ID`, `TG_PARSE_MODE`
-- **APIs:** `DEXSCREENER_BASE`, `GECKO_BASE`, `CG_ONCHAIN_BASE`, `CG_API_KEY`, `ONCHAIN_PROVIDER`
-- **Filters:** `MARKET_CAP_MIN`, `MARKET_CAP_MAX`, `TX24H_MAX`
-- **Concurrency:** `CHAIN_SCAN_WORKERS`, `ALERT_FETCH_WORKERS`
-- **Dexscreener throttle:** `DS_CALLS_PER_SEC`, `DS_MAX_CONCURRENCY`, `DS_ADAPTIVE_WINDOW`, backoff/recover thresholds and steps
+See `.env.example` for all variables. Key ones and defaults:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `GECKO_BASE` | `https://api.geckoterminal.com/api/v2` | Public GT API base |
+| `GECKO_CALLS_PER_MIN` | `28` | Public budget target (< 30/min) |
+| `GECKO_RETRY_AFTER_CAP_S` | `3.0` | Max sleep for Retry-After |
+| `GECKO_SOURCES` | `new,trending` | Both sources each cycle (no rotation) |
+| `GECKO_PAGES_PER_CHAIN` | `3` | Pages per source per chain |
+| `GECKO_PAGE_SIZE` | `100` | Items per page |
+| `LIQUIDITY_MIN` | `50000` | USD |
+| `LIQUIDITY_MAX` | `800000` | USD |
+| `TX24H_MAX` | `2000` | Buys + sells in 24h |
+| `GECKO_TTL_SEC` | `30` | TTL for OHLCV cache |
+| `MAX_OHLCV_PROBES` | `30` | Per cycle cap after discovery |
+| `ALERT_RATIO_MIN` | `1.0` | Alert threshold multiplier |
+| `SEEN_TTL_SEC` | `900` | Skip OHLCV for seen pools (15m) |
+| `COOLDOWN_MIN` | `30` | Per-pool alert cooldown |
+| `LOOP_SECONDS` | `60` | Target loop duration |
+| `CHAIN_SCAN_WORKERS` | `4` | Parallel chains for discovery |
+| `ALERT_FETCH_WORKERS` | `8` | Parallel alert checks/sends |
+| `TG_PARSE_MODE` | `Markdown` | Telegram parse mode |
+| `CHAINS` | `base,solana,ethereum` | Supported: `ethereum→eth`, `base`, `solana` |
+
+Typical per-loop budget: pages * sources + OHLCV probes (keep under `GECKO_CALLS_PER_MIN`).
 
 Example `.env` snippet:
 
 ```bash
-# Discovery/filters
-MARKET_CAP_MIN=50000
-MARKET_CAP_MAX=800000
+GECKO_BASE=https://api.geckoterminal.com/api/v2
+GECKO_CALLS_PER_MIN=28
+GECKO_RETRY_AFTER_CAP_S=3.0
+GECKO_SOURCES=new,trending
+GECKO_PAGES_PER_CHAIN=3
+GECKO_PAGE_SIZE=100
+LIQUIDITY_MIN=50000
+LIQUIDITY_MAX=800000
 TX24H_MAX=2000
 CHAINS=base,solana,ethereum
-
-# Loop/concurrency
+GECKO_TTL_SEC=30
+MAX_OHLCV_PROBES=30
+ALERT_RATIO_MIN=1.0
+SEEN_TTL_SEC=900
 COOLDOWN_MIN=30
 LOOP_SECONDS=60
 CHAIN_SCAN_WORKERS=4
 ALERT_FETCH_WORKERS=8
 MAX_CYCLES=0
-
-# Logging
 SAVE_CANDIDATES=true
 CANDIDATES_PATH=./candidates.jsonl
-
-# Discovery breadth
-SCAN_BY_DEX=true
-FALLBACK_BUCKETED_SEARCH=true
-BUCKET_ALPHABET=abcdefghijklmnopqrstuvwxyz0123456789
-USE_TWO_CHAR_BUCKETS=true
-MAX_BUCKETS_PER_CHAIN=1200
-BUCKET_DELAY_SEC=0.01
-MAX_PAIRS_PER_DEX=5000
-BUCKET_SEARCH_TARGET=0
-BUCKET_SEARCH_WORKERS=32
-BUCKET_RETRY_LIMIT=2
-
-# CoinGecko On-Chain (public REST)
-CG_ONCHAIN_BASE=https://api.coingecko.com/api/v3
-CG_API_KEY=
-CG_TIMEOUT_SEC=20
-CG_TTL_SEC=60
-ONCHAIN_PROVIDER=coingecko
-
-# Dexscreener throttling/adaptivity (keep as in project)
-DS_CALLS_PER_SEC=12
-DS_CALLS_PER_SEC_MIN=1
-DS_MAX_CONCURRENCY=8
-DS_ADAPTIVE_WINDOW=100
-DS_BACKOFF_THRESHOLD=0.30
-DS_RECOVER_THRESHOLD=0.10
-DS_DECREASE_STEP=0.25
-DS_INCREASE_STEP=0.10
-DS_RETRY_AFTER_CAP_S=3
+DB_PATH=wake_state.sqlite
 ```
 
 ### Tests
@@ -129,13 +121,14 @@ Run unit tests:
 pytest -q
 ```
 
-Covers:
+Coverage includes:
 - Address normalization and TOKEN/native determination
-- FDV/tx filters
-- Alert rule (incl. prev48 == 0 edge case)
+- Liquidity/tx filters
+- Alert rule and cooldown
 - Throttler behavior and adaptive changes
 - Gecko TTL cache (no HTTP until TTL expiry)
 
 ### Notes
+- Public GeckoTerminal only; no DexScreener or CoinGecko On-Chain
 - Works on Windows, macOS, Linux; no POSIX-only dependencies
 - No Docker/Poetry required (optional to add later)

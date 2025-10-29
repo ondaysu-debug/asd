@@ -36,20 +36,21 @@ def make_cfg(tmp_path, cooldown_min=0):
         gecko_retry_after_cap_s=1.0,
         gecko_ttl_sec=60,
         gecko_sources="new,trending",
-        gecko_source_mode="rotate",
         gecko_pages_per_chain=1,
         gecko_page_size=50,
         max_ohlcv_probes=30,
+        alert_ratio_min=0.5,
+        seen_ttl_sec=900,
         db_path=tmp_path / "state.sqlite",
     )
 
 
 def test_should_alert_rule_edges():
     # vol1h must exceed prev48h and both > 0
-    assert should_alert(100.0, 99.0) is True
-    assert should_alert(50.0, 50.0) is False
-    assert should_alert(50.1, 50.0) is True
-    assert should_alert(0.0, 0.0) is False
+    assert should_alert(100.0, 99.0, 1.0) is True
+    assert should_alert(50.0, 50.0, 1.0) is False
+    assert should_alert(50.1, 50.0, 1.0) is True
+    assert should_alert(0.0, 0.0, 1.0) is False
 
 
 class DummyHttp:

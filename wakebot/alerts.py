@@ -47,8 +47,8 @@ class Notifier:
             print("TG error:", e)
 
 
-def should_alert(vol1h: float, prev48h: float) -> bool:
-    return vol1h > 0.0 and prev48h > 0.0 and vol1h > prev48h
+def should_alert(vol1h: float, prev48h: float, ratio_min: float) -> bool:
+    return vol1h > 0.0 and prev48h > 0.0 and (vol1h > prev48h * max(0.0, float(ratio_min)))
 
 
 def get_window_stats(
@@ -91,10 +91,12 @@ def maybe_alert(
         if ws is None:
             return
         vol1h, prev48h, source_tag = ws
+        # Mark as seen regardless of alert outcome to avoid repeated OHLCV probes within TTL
+        storage.mark_as_seen(conn, meta.pool)
         if prev48h <= 0:
             return
 
-        if not should_alert(vol1h, prev48h):
+        if not should_alert(vol1h, prev48h, cfg.alert_ratio_min):
             return
 
         storage.set_last_alert_ts(conn, meta.pool, int(datetime.now(timezone.utc).timestamp()))
@@ -105,14 +107,14 @@ def maybe_alert(
 
     text = (
         f"🚨 WAKE-UP ({meta.chain.capitalize()})\n"
-        f"Pool: {meta.pool}\n"
-        f"Token: {meta.token_symbol or 'n/a'}\n"
-        f"Contract: `{meta.token_addr or 'n/a'}`\n"
+        f"Pool: {_escape_md(meta.pool)}\n"
+        f"Token: {_escape_md(meta.token_symbol or 'n/a')}\n"
+        f"Contract: `{_escape_md(meta.token_addr or 'n/a')}`\n"
         f"Liquidity: ${_nice(meta.liquidity)}\n"
         f"1h Vol: ${_nice(vol1h)} ({source_tag})\n"
         f"Prev 48h Vol (excl. current 1h): ${_nice(prev48)}\n"
         f"Ratio 1h/prev48h: {ratio:.2f}x\n"
-        f"Link: {meta.url}"
+        f"Link: {_escape_md(meta.url)}"
     )
     notifier.send(text)
 
@@ -129,3 +131,10 @@ def _nice(x: float | int | None) -> str:
         return f"{v:.2f}"
     except Exception:
         return "n/a"
+
+
+_MD_ESC = str.maketrans({"_": r"\_", "*": r"\*", "`": r"\`", "[": r"\[", "]": r"\]", "(": r"\(", ")": r"\)"})
+
+
+def _escape_md(s: str) -> str:
+    return s.translate(_MD_ESC) if s else s

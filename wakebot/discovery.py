@@ -87,11 +87,15 @@ def gt_fetch_page(cfg: Config, http: HttpClient, chain: str, source: str, page: 
 
 def gt_discover_new_pairs(cfg: Config, http: HttpClient, chain: str) -> list[dict]:
     """
-    Fetch first page from configured sources for the given chain.
-    Main loop may choose rotation and page count; this is a convenience wrapper.
+    Discover TOKEN/native pools from GeckoTerminal using configured sources and pages.
+    Sources: values from cfg.gecko_sources (comma-separated), supporting "new", "trending" (and raw "pools").
+    Pages: 1..cfg.gecko_pages_per_chain for each source.
     """
     out: list[dict] = []
-    for source in (cfg.gecko_sources_list or ["new"]):
-        page_one = gt_fetch_page(cfg, http, chain, source, 1)
-        out.extend(page_one)
+    sources = cfg.gecko_sources_list or ["new"]
+    for source in sources:
+        for page in range(1, cfg.gecko_pages_per_chain + 1):
+            items = gt_fetch_page(cfg, http, chain, source, page)
+            if items:
+                out.extend(items)
     return out
