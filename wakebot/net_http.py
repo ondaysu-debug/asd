@@ -10,7 +10,7 @@ import requests
 from requests.adapters import HTTPAdapter, Retry
 
 from .config import Config
-from .rate_limit import AdaptiveParams, DexscreenerLimiter
+from .rate_limit import AdaptiveParams, ApiRateLimiter
 
 
 def _default_logger(msg: str) -> None:
@@ -19,9 +19,8 @@ def _default_logger(msg: str) -> None:
 
 class HttpClient:
     """
-    Shared HTTP client with two helpers:
-    - get_json: generic JSON fetch (used for Gecko)
-    - ds_get_json: Dexscreener fetch with global throttling/adaptive limiter and Retry-After respect
+    Shared HTTP client for GeckoTerminal with throttled JSON fetch:
+    - gt_get_json: GeckoTerminal fetch with global throttling/adaptive limiter and Retry-After respect
     """
 
     def __init__(self, cfg: Config, log_fn: Callable[[str], None] | None = None) -> None:
@@ -29,17 +28,19 @@ class HttpClient:
         self._log = log_fn or _default_logger
         self._local = threading.local()
 
-        # global rate limiter for Dexscreener
-        self._limiter = DexscreenerLimiter(
-            max_concurrency=cfg.ds_max_concurrency,
+        # global rate limiter for GeckoTerminal (public rate ~<30/min)
+        base_rps = max(0.0, float(cfg.gecko_calls_per_min) / 60.0)
+        min_rps = max(0.2, base_rps * 0.5)
+        self._limiter = ApiRateLimiter(
+            max_concurrency=8,
             adaptive=AdaptiveParams(
-                base_rps=cfg.ds_calls_per_sec_base,
-                min_rps=cfg.ds_calls_per_sec_min,
-                backoff_threshold=cfg.ds_backoff_threshold,
-                recover_threshold=cfg.ds_recover_threshold,
-                decrease_step=cfg.ds_decrease_step,
-                increase_step=cfg.ds_increase_step,
-                window=cfg.ds_adaptive_window,
+                base_rps=base_rps,
+                min_rps=min_rps,
+                backoff_threshold=0.30,
+                recover_threshold=0.10,
+                decrease_step=0.25,
+                increase_step=0.10,
+                window=60,
             ),
             log_fn=self._log,
         )
@@ -71,21 +72,12 @@ class HttpClient:
             self._local.session = session
         return session
 
-    # ----- generic -----
-    def get_json(self, url: str, timeout: float = 20.0) -> dict[str, Any]:
-        r = self._session().get(url, timeout=timeout)
-        r.raise_for_status()
-        try:
-            return r.json() or {}
-        except Exception:
-            return {}
-
-    # ----- Dexscreener with throttling -----
-    def ds_get_json(self, url: str, timeout: float = 20.0) -> dict[str, Any]:
+    # ----- GeckoTerminal with throttling -----
+    def gt_get_json(self, url: str, timeout: float = 20.0) -> dict[str, Any]:
         # acquire limiter: may need to sleep based on tokens
         sleep_for = self._limiter.acquire()
         if sleep_for > 0:
-            self._log(f"[ds] throttling sleep {sleep_for:.3f}s @ rate={self._limiter.get_rate():.2f}")
+            self._log(f"[gt] throttling sleep {sleep_for:.3f}s @ rate={self._limiter.get_rate():.2f}")
             time.sleep(min(sleep_for, 5.0))
         try:
             r = self._session().get(url, timeout=timeout)
@@ -98,8 +90,8 @@ class HttpClient:
                 if retry_after_hdr:
                     sleep_s = _parse_retry_after(retry_after_hdr)
                     if sleep_s is not None and sleep_s > 0:
-                        cap = max(0.0, self._cfg.ds_retry_after_cap_s)
-                        self._log(f"[ds] 429 Retry-After {sleep_s:.3f}s (cap {cap:.3f}s)")
+                        cap = max(0.0, self._cfg.gecko_retry_after_cap_s)
+                        self._log(f"[gt] 429 Retry-After {sleep_s:.3f}s (cap {cap:.3f}s)")
                         time.sleep(min(sleep_s, cap))
             r.raise_for_status()
             try:
