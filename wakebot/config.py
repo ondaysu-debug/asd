@@ -54,16 +54,16 @@ class Config:
     cmc_page_size: int
     # GT (legacy discovery; kept for tests/back-compat)
     gecko_sources: str
-    gecko_rotate_sources: bool = True
+    gecko_rotate_sources: bool
     gecko_pages_per_chain: int
-    gecko_dex_pages_per_chain: int = 1
+    gecko_dex_pages_per_chain: int
     gecko_page_size: int
 
     # Budget for OHLCV probes (dynamic per cycle)
-    max_ohlcv_probes_cap: int = 30
-    cmc_safety_budget: int = 4
-    gecko_safety_budget: int = 4  # legacy name (kept for back-compat)
-    min_ohlcv_probes: int = 3
+    max_ohlcv_probes_cap: int
+    cmc_safety_budget: int
+    gecko_safety_budget: int  # legacy name (kept for back-compat)
+    min_ohlcv_probes: int
     # Back-compat (tests and older code may still reference this)
     max_ohlcv_probes: int
 
@@ -80,7 +80,7 @@ class Config:
     revival_min_age_days: int
 
     # Seen-cache for OHLCV budget saving
-    seen_ttl_min: int = 15
+    seen_ttl_min: int
     # Back-compat (tests use seconds)
     seen_ttl_sec: int
 
@@ -94,6 +94,9 @@ class Config:
     # Helper properties (populated in load())
     gecko_sources_list: List[str] | None = None
     cmc_sources_list: List[str] | None = None
+    
+    # Chain slug mapping for CMC API
+    chain_slugs: dict[str, str] | None = None
     
     # Legacy revival configuration (kept for tests/back-compat)
     revival_enabled: bool = True
@@ -111,6 +114,8 @@ class Config:
         tg_parse_mode = os.getenv("TG_PARSE_MODE", "Markdown")
 
         # API bases
+        # CMC DEX API v3 (dexer) - free tier endpoint
+        # NOTE: Update to /v4/dex if v4 becomes available and documented
         cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://api.coinmarketcap.com/dexer/v3")
         cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://pro-api.coinmarketcap.com/dexer/v3")
         cmc_api_key = os.getenv("CMC_API_KEY", "")
@@ -236,6 +241,14 @@ class Config:
         # helper: parsed list of sources
         cfg.gecko_sources_list = [s.strip() for s in (cfg.gecko_sources or "").split(",") if s.strip()]
         cfg.cmc_sources_list = [s.strip() for s in (cfg.cmc_sources or "").split(",") if s.strip()]
+        
+        # Chain slug mapping for CMC DEX API
+        cfg.chain_slugs = {
+            "base": "base",
+            "ethereum": "ethereum",
+            "solana": "solana",
+            "bsc": "bnb",  # CMC uses 'bnb' for BSC chain
+        }
 
         # Attach revival config
         cfg.revival_enabled = revival_enabled
