@@ -1,4 +1,4 @@
-from wakebot.filters import normalize_address, is_token_native_pair, fdv_tx_filters, is_base_token_acceptable
+from wakebot.filters import normalize_address, is_token_native_pair, pool_data_filters, is_base_token_acceptable
 from wakebot.constants import NATIVE_ADDR
 
 
@@ -36,8 +36,8 @@ def test_is_base_token_acceptable_filters_majors_and_natives():
     assert is_base_token_acceptable(chain, {"address": "0xToken2", "symbol": "AAA"})
 
 
-def test_fdv_tx_filters_range():
-    assert fdv_tx_filters(100_000, 50_000, 800_000, 100, 2_000)
-    assert not fdv_tx_filters(10_000, 50_000, 800_000, 100, 2_000)
-    assert not fdv_tx_filters(900_000, 50_000, 800_000, 100, 2_000)
-    assert not fdv_tx_filters(100_000, 50_000, 800_000, 5000, 2_000)
+def test_pool_data_filters_range():
+    assert pool_data_filters(100_000, 50_000, 800_000, 100, 2_000)
+    assert not pool_data_filters(10_000, 50_000, 800_000, 100, 2_000)
+    assert not pool_data_filters(900_000, 50_000, 800_000, 100, 2_000)
+    assert not pool_data_filters(100_000, 50_000, 800_000, 5000, 2_000)

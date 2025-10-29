@@ -46,8 +46,8 @@ def is_base_token_acceptable(chain: str, token: Dict) -> bool:
     return True
 
 
-def fdv_tx_filters(fdv: float, market_cap_min: float, market_cap_max: float, tx24h: int, tx24h_max: int) -> bool:
-    if not (market_cap_min <= fdv <= market_cap_max):
+def pool_data_filters(liquidity: float, liq_min: float, liq_max: float, tx24h: int, tx24h_max: int) -> bool:
+    if not (liq_min <= liquidity <= liq_max):
         return False
     if tx24h > tx24h_max:
         return False

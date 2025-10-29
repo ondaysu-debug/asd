@@ -18,7 +18,7 @@ class AdaptiveParams:
     window: int               # last N responses to compute 429 ratio
 
 
-class DexscreenerLimiter:
+class ApiRateLimiter:
     """
     Global token bucket + concurrency limiter + adaptive RPS.
 
@@ -112,14 +112,14 @@ class DexscreenerLimiter:
                 if new_rate < old:
                     self._effective_rps = new_rate
                     self._capacity = new_rate
-                    self._log(f"[ds] high 429 rate {int(ratio*100)}% → decrease RPS {old:.2f}→{new_rate:.2f}")
+                    self._log(f"[api] high 429 rate {int(ratio*100)}% → decrease RPS {old:.2f}→{new_rate:.2f}")
             elif ratio <= self._adaptive.recover_threshold and old < self._adaptive.base_rps:
                 # recover (increase)
                 target = min(self._adaptive.base_rps, old + self._adaptive.base_rps * self._adaptive.increase_step)
                 if target > old:
                     self._effective_rps = target
                     self._capacity = target
-                    self._log(f"[ds] normalized {int(ratio*100)}% 429 → increase RPS {old:.2f}→{target:.2f}")
+                    self._log(f"[api] normalized {int(ratio*100)}% 429 → increase RPS {old:.2f}→{target:.2f}")
 
     def get_rate(self) -> float:
         with self._lock:

@@ -1,12 +1,12 @@
 import time
 
-from wakebot.rate_limit import AdaptiveParams, DexscreenerLimiter
+from wakebot.rate_limit import AdaptiveParams, ApiRateLimiter
 
 
 def test_token_bucket_limits_throughput():
     # RPS=2, 5 sequential acquires should take at least ~1.5s (initial token available, then ~0.5s each)
     logs = []
-    limiter = DexscreenerLimiter(
+    limiter = ApiRateLimiter(
         max_concurrency=10,
         adaptive=AdaptiveParams(
             base_rps=2.0,
@@ -34,7 +34,7 @@ def test_token_bucket_limits_throughput():
 
 def test_adaptive_decrease_and_recover():
     logs = []
-    limiter = DexscreenerLimiter(
+    limiter = ApiRateLimiter(
         max_concurrency=2,
         adaptive=AdaptiveParams(
             base_rps=8.0,

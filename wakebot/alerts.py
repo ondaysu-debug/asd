@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Dict, Tuple
+from typing import Callable, Tuple
 
 import requests
 
 from .config import Config
-from .gecko import GeckoCache, fetch_gecko_metrics
+from .gecko import GeckoCache, fetch_ohlcv_49h
+from .net_http import HttpClient
 from .storage import Storage
 
 
@@ -18,9 +19,7 @@ class AlertInputs:
     url: str
     token_symbol: str
     token_addr: str
-    fdv: float
-    ds_vol1h: float
-    ds_vol48h: float
+    liquidity: float
 
 
 class Notifier:
@@ -48,43 +47,34 @@ class Notifier:
             print("TG error:", e)
 
 
-def should_alert(vol1h: float, vol48h: float) -> bool:
-    prev48 = max(vol48h - vol1h, 0.0)
-    return vol1h > 0.0 and vol1h > prev48
+def should_alert(vol1h: float, prev48h: float) -> bool:
+    return vol1h > 0.0 and prev48h > 0.0 and vol1h > prev48h
 
 
 def get_window_stats(
     cfg: Config,
+    http: HttpClient,
+    cache: GeckoCache,
     meta: AlertInputs,
-    fetch_window: Callable[[str, str], Tuple[float, int, float]],
-) -> Tuple[float, int, float, str] | None:
+) -> Tuple[float, float, str] | None:
     """
-    Пытается получить (vol1h, tx1h, vol48h, source_tag).
-    1) Пробуем REST-провайдер (оборачивается вызывающим кодом)
-    2) При ошибке или нулях: fallback на DexScreener-поля из meta (vol1h_ds/vol48h_ds)
+    Получает (vol1h, prev48h, source_tag) используя GeckoTerminal OHLCV.
+    Возвращает None при нулевых значениях окна.
     """
     try:
-        vol1h, tx1h, vol48h = fetch_window(meta.chain, meta.pool)
-    except Exception as e:
-        print(f"[onchain] fallback to DexScreener for {meta.chain}/{meta.pool}: {e}")
-        vol1h, tx1h, vol48h = (0.0, 0, 0.0)
-
-    if (vol1h, tx1h, vol48h) != (0.0, 0, 0.0):
-        return vol1h, tx1h, vol48h, "CoinGeckoREST"
-
-    # Fallback to DexScreener metrics from discovery candidate
-    vol1h = float(meta.ds_vol1h or 0.0)
-    vol48h = float(meta.ds_vol48h or 0.0)
-    if vol1h <= 0 and vol48h <= 0:
+        vol1h, prev48h = fetch_ohlcv_49h(cfg, http, meta.chain, meta.pool, cache)
+    except Exception:
+        vol1h, prev48h = (0.0, 0.0)
+    if vol1h <= 0.0 and prev48h <= 0.0:
         return None
-    return vol1h, 0, vol48h, "DexScreener"
+    return vol1h, prev48h, "GeckoTerminal-OHLCV"
 
 
 def maybe_alert(
     cfg: Config,
     storage: Storage,
     cache: GeckoCache,
-    fetch_gecko: Callable[[str, str], Tuple[float, int, float]],
+    http: HttpClient,
     notifier: Notifier,
     meta: AlertInputs,
 ) -> None:
@@ -96,20 +86,20 @@ def maybe_alert(
             if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cfg.cooldown_min):
                 return
 
-        # Use window stats from REST provider with DexScreener fallback
-        ws = get_window_stats(cfg, meta, fetch_gecko)
+        # Use window stats from GeckoTerminal OHLCV
+        ws = get_window_stats(cfg, http, cache, meta)
         if ws is None:
             return
-        vol1h, tx1h, vol48h, source_tag = ws
-        if vol48h <= 0:
+        vol1h, prev48h, source_tag = ws
+        if prev48h <= 0:
             return
 
-        if not should_alert(vol1h, vol48h):
+        if not should_alert(vol1h, prev48h):
             return
 
         storage.set_last_alert_ts(conn, meta.pool, int(datetime.now(timezone.utc).timestamp()))
 
-    prev48 = max(vol48h - vol1h, 0.0)
+    prev48 = prev48h
     ratio = (vol1h / prev48) if prev48 > 0 else float("inf")
     # source_tag provided by get_window_stats
 
@@ -118,7 +108,7 @@ def maybe_alert(
         f"Pool: {meta.pool}\n"
         f"Token: {meta.token_symbol or 'n/a'}\n"
         f"Contract: `{meta.token_addr or 'n/a'}`\n"
-        f"FDV: ${_nice(meta.fdv)}\n\n"
+        f"Liquidity: ${_nice(meta.liquidity)}\n"
         f"1h Vol: ${_nice(vol1h)} ({source_tag})\n"
         f"Prev 48h Vol (excl. current 1h): ${_nice(prev48)}\n"
         f"Ratio 1h/prev48h: {ratio:.2f}x\n"

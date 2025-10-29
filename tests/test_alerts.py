@@ -20,10 +20,9 @@ def make_cfg(tmp_path, cooldown_min=0):
         tg_bot_token="",
         tg_chat_id="",
         tg_parse_mode="Markdown",
-        dexscreener_base="https://example.com",
         gecko_base="https://example.com",
-        market_cap_min=50_000,
-        market_cap_max=800_000,
+        liquidity_min=50_000,
+        liquidity_max=800_000,
         tx24h_max=2000,
         chains=["ethereum"],
         cooldown_min=cooldown_min,
@@ -33,89 +32,87 @@ def make_cfg(tmp_path, cooldown_min=0):
         max_cycles=0,
         save_candidates=False,
         candidates_path=tmp_path / "candidates.jsonl",
-        scan_by_dex=True,
-        fallback_bucketed_search=True,
-        bucket_alphabet="ab",
-        use_two_char_buckets=False,
-        max_buckets_per_chain=10,
-        bucket_delay_sec=0.0,
-        max_pairs_per_dex=100,
-        bucket_search_target=0,
-        bucket_search_workers=4,
-        bucket_retry_limit=1,
+        gecko_calls_per_min=28,
+        gecko_retry_after_cap_s=1.0,
         gecko_ttl_sec=60,
-        ds_calls_per_sec_base=5.0,
-        ds_calls_per_sec_min=1.0,
-        ds_max_concurrency=4,
-        ds_adaptive_window=10,
-        ds_backoff_threshold=0.3,
-        ds_recover_threshold=0.1,
-        ds_decrease_step=0.25,
-        ds_increase_step=0.10,
-        ds_retry_after_cap_s=1.0,
+        gecko_sources="new,trending",
+        gecko_source_mode="rotate",
+        gecko_pages_per_chain=1,
+        gecko_page_size=50,
+        max_ohlcv_probes=30,
         db_path=tmp_path / "state.sqlite",
     )
 
 
 def test_should_alert_rule_edges():
-    # prev48 = max(100-100,0) = 0 => alert
-    assert should_alert(100.0, 100.0) is True
-    # vol1h==prev48 -> no alert
-    assert should_alert(50.0, 100.0) is False
-    # slightly greater than prev48 -> alert
-    assert should_alert(50.1, 100.0) is True
+    # vol1h must exceed prev48h and both > 0
+    assert should_alert(100.0, 99.0) is True
+    assert should_alert(50.0, 50.0) is False
+    assert should_alert(50.1, 50.0) is True
     assert should_alert(0.0, 0.0) is False
+
+
+class DummyHttp:
+    def __init__(self, v1: float, prev48: float):
+        self.v1 = v1
+        self.prev48 = prev48
+
+    def gt_get_json(self, url: str, timeout: float = 20.0):
+        # Build candles that sum to prev48 for previous window and v1 for last hour
+        prev = []
+        remaining = self.prev48
+        # simple two-candle split
+        a = max(0.0, remaining - 1.0)
+        b = remaining - a
+        prev = [
+            [0, 0, 0, 0, 0, a],
+            [1, 0, 0, 0, 0, b],
+        ]
+        last = [2, 0, 0, 0, 0, self.v1]
+        return {
+            "data": {"attributes": {"candles": prev + [last]}}
+        }
 
 
 def test_maybe_alert_with_gecko_then_cooldown(tmp_path):
     cfg = make_cfg(tmp_path, cooldown_min=1)
     storage = Storage(cfg)
     cache = GeckoCache(cfg.gecko_ttl_sec)
-
-    def fetch_gecko(chain, pool):
-        return (60.0, 10, 100.0)
-
+    http = DummyHttp(60.0, 100.0)
     notifier = DummyNotifier(cfg)
 
     meta = AlertInputs(
         chain="ethereum",
         pool="0xPOOL",
-        url="https://dexscreener.com/ethereum/0xPOOL",
+        url="https://www.geckoterminal.com/eth/pools/0xPOOL",
         token_symbol="TKN",
         token_addr="0xToken",
-        fdv=100000.0,
-        ds_vol1h=0.0,
-        ds_vol48h=0.0,
+        liquidity=100000.0,
     )
 
-    maybe_alert(cfg, storage, cache, fetch_gecko, notifier, meta)
+    maybe_alert(cfg, storage, cache, http, notifier, meta)
     assert len(notifier.sent) == 1
 
     # cooldown immediate second alert should be blocked
-    maybe_alert(cfg, storage, cache, fetch_gecko, notifier, meta)
+    maybe_alert(cfg, storage, cache, http, notifier, meta)
     assert len(notifier.sent) == 1
 
 
-def test_maybe_alert_fallback_to_ds_and_vol48_zero_no_alert(tmp_path):
+def test_maybe_alert_no_alert_when_zero_window(tmp_path):
     cfg = make_cfg(tmp_path)
     storage = Storage(cfg)
     cache = GeckoCache(cfg.gecko_ttl_sec)
-
-    def fetch_gecko(chain, pool):
-        return (0.0, 0, 0.0)  # gecko failed
-
+    http = DummyHttp(0.0, 0.0)
     notifier = DummyNotifier(cfg)
 
     meta = AlertInputs(
         chain="ethereum",
         pool="0xPOOL",
-        url="https://dexscreener.com/ethereum/0xPOOL",
+        url="https://www.geckoterminal.com/eth/pools/0xPOOL",
         token_symbol="TKN",
         token_addr="0xToken",
-        fdv=100000.0,
-        ds_vol1h=60.0,
-        ds_vol48h=0.0,  # zero => no alert
+        liquidity=100000.0,
     )
 
-    maybe_alert(cfg, storage, cache, fetch_gecko, notifier, meta)
+    maybe_alert(cfg, storage, cache, http, notifier, meta)
     assert len(notifier.sent) == 0

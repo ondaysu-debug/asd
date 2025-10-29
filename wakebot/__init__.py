@@ -2,7 +2,7 @@ from .config import Config
 from .net_http import HttpClient
 from .gecko import GeckoCache
 from .alerts import Notifier, AlertInputs, should_alert
-from .rate_limit import DexscreenerLimiter, AdaptiveParams
+from .rate_limit import ApiRateLimiter, AdaptiveParams
 
 __all__ = [
     "Config",
@@ -11,6 +11,6 @@ __all__ = [
     "Notifier",
     "AlertInputs",
     "should_alert",
-    "DexscreenerLimiter",
+    "ApiRateLimiter",
     "AdaptiveParams",
 ]
