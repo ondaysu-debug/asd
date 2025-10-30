@@ -81,9 +81,8 @@ def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
         chain = (cfg.chains or ["ethereum"])[0]
         cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
         
-        # Light discovery call (1 page, limit=5)
-        # CMC DEX v4 endpoint
-        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=new&page=1&limit=5"
+        # Light discovery call (1 page, limit=5) - CMC DEX v4 without category
+        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&page=1&limit=5"
         try:
             doc = http.cmc_get_json(discovery_url, timeout=10.0) or {}
             ok = ok and bool(doc.get("data"))

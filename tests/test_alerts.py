@@ -57,6 +57,7 @@ def make_cfg(tmp_path, cooldown_min=0):
         alert_ratio_min=0.5,
         min_prev24_usd=1000,
         revival_min_age_days=7,
+        dq_discrepancy_threshold=0.25,
         seen_ttl_min=15,
         seen_ttl_sec=900,
         save_candidates=False,
