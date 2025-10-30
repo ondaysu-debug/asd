@@ -4,6 +4,7 @@ from typing import Dict, List, Tuple
 
 from .config import Config
 from .filters import is_base_token_acceptable, is_token_native_pair, pool_data_filters
+from .cmc import _validate_cmc_pairs_doc
 from .gecko import _normalize_gt_chain
 from .net_http import HttpClient
 
@@ -220,12 +221,10 @@ def gt_discover_by_source(
 
 # ---------------- CMC DEX discovery ----------------
 
-def _normalize_cmc_chain(chain: str) -> str:
-    # CMC DEX uses canonical names: 'ethereum','bsc','solana','base'
+def _cmc_chain_slug(cfg: Config, chain: str) -> str:
+    # Prefer configured slug mapping; fallback to the input as-is
     s = (chain or "").strip().lower()
-    if s in {"ethereum", "bsc", "solana", "base"}:
-        return s
-    return s
+    return (cfg.chain_slugs or {}).get(s, s)
 
 
 def _cmc_pool_url_hint(pool_id: str) -> str:
@@ -299,16 +298,22 @@ def cmc_discover_by_source(
     start_page: int,
     page_limit: int,
 ) -> tuple[list[dict], dict[str, int]]:
-    cmc_chain = _normalize_cmc_chain(chain)
+    cmc_chain = _cmc_chain_slug(cfg, chain)
     s = (source or "").strip().lower()
     out: list[dict] = []
     scanned_pairs = 0
     pages_done = 0
+    invalid_pages = 0
 
     def _fetch_page(url: str) -> list[dict]:
         nonlocal scanned_pairs, pages_done
         try:
             doc = http.cmc_get_json(url, timeout=20.0) or {}
+            if not _validate_cmc_pairs_doc(doc):
+                print(f"[cmc][validate] unexpected discovery schema; skipping page {page}")
+                pages_done += 1
+                invalid_pages += 1
+                return []
         except Exception as e:
             print(f"[{chain}] CMC {s} error: {e}")
             pages_done += 1
@@ -348,6 +353,9 @@ def cmc_discover_by_source(
 
     if s in {"new", "trending", "pools"}:
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
+            # Note: CMC public doc shows v4 path like /v4/dex/spot-pairs/latest with params.
+            # Our production endpoint uses dexer/v3 style: /{chain}/pools[/new|/trending].
+            # Adapt here if your account exposes a different schema.
             url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools/{'new' if s=='new' else 'trending' if s=='trending' else ''}"
             if url.endswith("/"):
                 url = url[:-1]
@@ -357,6 +365,7 @@ def cmc_discover_by_source(
                 out.extend(items)
     elif s == "dexes":
         # list dexes
+        # In v4 doc this may be available under /v4/dex/dexes; here we use dexer/v3 style
         dexes_url = f"{cfg.cmc_dex_base}/{cmc_chain}/dexes"
         try:
             doc = http.cmc_get_json(dexes_url, timeout=20.0) or {}
@@ -388,7 +397,7 @@ def cmc_discover_by_source(
         pid = it.get("pool")
         if pid and pid not in dedup:
             dedup[pid] = it
-    return list(dedup.values()), {"pages_done": pages_done, "scanned_pairs": scanned_pairs}
+    return list(dedup.values()), {"pages_done": pages_done, "scanned_pairs": scanned_pairs, "validation_errors": invalid_pages}
 
 
 def cmc_discover_candidates(
