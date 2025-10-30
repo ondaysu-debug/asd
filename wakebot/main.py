@@ -81,8 +81,8 @@ def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
         chain = (cfg.chains or ["ethereum"])[0]
         cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
         
-        # Light discovery call (1 page, limit=5) - CMC DEX v4 without category
-        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&page=1&limit=5"
+        # Light discovery call (1 page, limit=5) - CMC DEX v4 with mandatory category=all
+        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=all&page=1&limit=5"
         try:
             doc = http.cmc_get_json(discovery_url, timeout=10.0) or {}
             ok = ok and bool(doc.get("data"))
@@ -252,20 +252,13 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
                             if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cfg.cooldown_min):
                                 return {"probed": True, "probed_ok": True, "alert": False, "chain": inp.chain, "source": ""}
 
-                    vol1h, prev24h, ok_age = fetch_cmc_ohlcv_25h(cfg, http, inp.chain, inp.pool, cache, inp.pool_created_at)
+                    vol1h, prev24h, ok_age, source = fetch_cmc_ohlcv_25h(cfg, http, inp.chain, inp.pool, cache, inp.pool_created_at)
                     # Mark seen regardless of alert outcome
                     with storage.get_conn() as conn:
                         storage.mark_as_seen(conn, inp.chain, inp.pool)
 
                     if not should_alert_revival_cmc(vol1h, prev24h, ok_age, cfg):
-                        return {"probed": True, "probed_ok": True, "alert": False, "chain": inp.chain, "source": "CMC DEX"}
-
-                    # Determine source (CMC or fallback)
-                    source = "CMC DEX"
-                    # If GT fallback was used, it would be indicated in fetch_cmc_ohlcv_25h logs
-                    # For now, assume CMC unless we explicitly track it
-                    if cfg.allow_gt_ohlcv_fallback and (vol1h == 0.0 and prev24h == 0.0):
-                        source = "CMC→GT fallback"
+                        return {"probed": True, "probed_ok": True, "alert": False, "chain": inp.chain, "source": source}
                     
                     # Send alert and set cooldown
                     text = build_revival_text_cmc(inp, inp.chain.capitalize(), vol1h, prev24h, source)
@@ -367,6 +360,11 @@ def main(argv: list[str] | None = None) -> None:
     if args.health_online:
         http = HttpClient(cfg)
         print("[health] Running online health check (CMC API ping)...")
+        # Debug: show final discovery URL with category parameter
+        chain = (cfg.chains or ["ethereum"])[0]
+        cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
+        debug_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=all&page=1&limit=5"
+        print(f"[health] debug discovery URL: {debug_url}")
         ok = health_check_online(cfg, http, logger=print)
         print(f"[health] Result: {'PASS' if ok else 'FAIL'}")
         import sys

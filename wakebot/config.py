@@ -100,8 +100,6 @@ class Config:
     
     # Chain slug mapping for CMC API
     chain_slugs: dict[str, str] | None = None
-    # Chain slug fallback variants (multiple options to try on 400)
-    cmc_chain_slugs: dict[str, list[str]] | None = None
     
     # Legacy revival configuration (kept for tests/back-compat)
     revival_enabled: bool = True
@@ -121,8 +119,8 @@ class Config:
         # API bases
         # CMC DEX API v4 (actual as of 2025)
         # Endpoints: /v4/dex/spot-pairs/latest (discovery), /v4/dex/pairs/ohlcv/latest (OHLCV)
-        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://api.coinmarketcap.com/v4/dex")
-        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://pro-api.coinmarketcap.com/v4/dex")
+        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://pro-api.coinmarketcap.com/v4/dex")
+        cmc_dex_base_alt = None  # Disabled: no fallback to api.coinmarketcap.com
         cmc_api_key = os.getenv("CMC_API_KEY", "")
         gecko_base = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2")
         allow_gt_ohlcv_fallback = _as_bool(os.getenv("ALLOW_GT_OHLCV_FALLBACK", "false"))
@@ -249,20 +247,12 @@ class Config:
         cfg.gecko_sources_list = [s.strip() for s in (cfg.gecko_sources or "").split(",") if s.strip()]
         cfg.cmc_sources_list = [s.strip() for s in (cfg.cmc_sources or "").split(",") if s.strip()]
         
-        # Chain slug mapping for CMC DEX API (with fallback variants)
+        # Chain slug mapping for CMC DEX API
         cfg.chain_slugs = {
             "base": "base",
             "ethereum": "ethereum",
             "solana": "solana",
             "bsc": "bnb",  # CMC uses 'bnb' for BSC chain
-        }
-        
-        # Chain slug fallback variants for CMC DEX API v4 (try multiple on 400)
-        cfg.cmc_chain_slugs = {
-            "ethereum": ["ethereum"],
-            "solana": ["solana"],
-            "base": ["base", "basescan", "base-mainnet"],
-            "bsc": ["bnb", "bsc", "binance-smart-chain"],
         }
 
         # Attach revival config

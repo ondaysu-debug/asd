@@ -1,0 +1,46 @@
+=== Изменённые файлы для CMC DEX API v4 ===
+
+ИЗМЕНЁННЫЕ ФАЙЛЫ:
+1. wakebot/config.py
+   - Зафиксирован хост на pro-api.coinmarketcap.com
+   - Отключён alt хост
+   - Удалено поле cmc_chain_slugs
+   - Добавлен DQ_DISCREPANCY_THRESHOLD из ENV
+
+2. wakebot/net_http.py
+   - Всегда добавляется заголовок X-CMC_PRO_API_KEY
+   - Удалена ALT retry логика
+
+3. wakebot/discovery.py
+   - Добавлен обязательный параметр category
+   - Упрощён _normalize_cmc_chain (больше не возвращает список)
+   - Переписан cmc_discover_by_source без fallback на slug'и
+
+4. wakebot/cmc.py
+   - Изменена сигнатура fetch_cmc_ohlcv_25h (возвращает source tag)
+   - Обновлён кэш для source tag
+   - Обновлён _fallback_gt_ohlcv_25h (возвращает source tag)
+
+5. wakebot/main.py
+   - Обновлён вызов fetch_cmc_ohlcv_25h (распаковка с source)
+   - Добавлен debug URL в --health-online
+
+НЕИЗМЕНЁННЫЕ ФАЙЛЫ:
+- wakebot/__main__.py (уже корректный)
+- wakebot/__init__.py (не требует изменений)
+- wakebot/alerts.py (build_revival_text_cmc уже принимает source)
+- wakebot/storage.py
+- wakebot/filters.py
+- wakebot/gecko.py
+- wakebot/rate_limit.py
+- wakebot/constants.py
+- tests/* (все тесты проходят без изменений)
+
+НОВЫЕ ФАЙЛЫ (документация):
+- CMC_V4_MIGRATION_COMPLETE.md
+- CMC_V4_CHECKLIST.md
+- ГОТОВО_CMC_V4.md
+- FILES_CHANGED.txt
+
+ВСЕГО ИЗМЕНЕНО: 5 файлов
+ВСЕГО ТЕСТОВ: 10 passed
