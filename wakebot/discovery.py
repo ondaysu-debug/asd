@@ -243,13 +243,18 @@ def gt_discover_by_source(
 
 # ---------------- CMC DEX discovery ----------------
 
-def _normalize_cmc_chain(cfg: Config, chain: str) -> str:
-    # Use chain_slugs mapping from config
+def _normalize_cmc_chain(cfg: Config, chain: str) -> list[str]:
+    """
+    Return list of chain slug variants to try (for fallback on 400).
+    Uses cmc_chain_slugs mapping from config with multiple variants per chain.
+    """
     s = (chain or "").strip().lower()
+    if cfg.cmc_chain_slugs and s in cfg.cmc_chain_slugs:
+        return cfg.cmc_chain_slugs[s]
+    # Fallback: try simple chain slug from chain_slugs, then raw chain
     if cfg.chain_slugs and s in cfg.chain_slugs:
-        return cfg.chain_slugs[s]
-    # Fallback: return normalized chain
-    return s
+        return [cfg.chain_slugs[s]]
+    return [s]
 
 
 def _cmc_pool_url_hint(pool_id: str) -> str:
@@ -323,95 +328,142 @@ def cmc_discover_by_source(
     start_page: int,
     page_limit: int,
 ) -> tuple[list[dict], dict[str, int]]:
-    cmc_chain = _normalize_cmc_chain(cfg, chain)
+    cmc_chain_variants = _normalize_cmc_chain(cfg, chain)
     s = (source or "").strip().lower()
     out: list[dict] = []
     scanned_pairs = 0
     pages_done = 0
 
-    def _fetch_page(url: str, page_num: int) -> list[dict]:
+    def _fetch_page_with_fallback(base_url_template: str, page_num: int) -> list[dict]:
+        """
+        Fetch page with chain_slug fallback: try each variant until first 200.
+        base_url_template should have {chain_slug} placeholder.
+        """
         nonlocal scanned_pairs, pages_done
-        try:
-            doc = http.cmc_get_json(url, timeout=20.0) or {}
-        except Exception as e:
-            print(f"[{chain}] CMC {s} error: {e}")
-            pages_done += 1
-            return []
+        last_error = None
         
-        # Validate response structure
-        if not _validate_cmc_pairs_doc(doc):
-            print(f"[cmc][validate] unexpected discovery schema; skipping {chain}/{s} page {page_num}")
-            pages_done += 1
-            return []
+        for cmc_chain in cmc_chain_variants:
+            url = base_url_template.format(chain_slug=cmc_chain)
+            try:
+                doc = http.cmc_get_json(url, timeout=20.0) or {}
+                # Validate response structure
+                if not _validate_cmc_pairs_doc(doc):
+                    print(f"[cmc][validate] unexpected discovery schema; skipping {chain}/{s} page {page_num}")
+                    continue
+                
+                # Success - process data
+                data = doc.get("data") or doc.get("result") or doc.get("items") or []
+                items: list[dict] = []
+                seen: set[str] = set()
+                for pool in data:
+                    pool_id, base_tok, quote_tok, liquidity, tx24h, pool_created_at = _extract_common_fields(pool)
+                    if not pool_id or pool_id in seen:
+                        continue
+                    seen.add(pool_id)
+                    scanned_pairs += 1
+                    ok, token_side, native_side = is_token_native_pair(chain, base_tok, quote_tok)
+                    if not ok:
+                        continue
+                    if not is_base_token_acceptable(chain, token_side):
+                        continue
+                    if not pool_data_filters(liquidity, cfg.liquidity_min, cfg.liquidity_max, tx24h, cfg.tx24h_max):
+                        continue
+                    
+                    # Extract volume for sorting (if available)
+                    volume_24h = 0.0
+                    try:
+                        volume_24h = float(pool.get("volume_24h_quote") or pool.get("volume_24h") or 0.0)
+                    except Exception:
+                        pass
+                    
+                    # Extract listed_at for sorting (if available)
+                    listed_at = pool.get("listed_at") or pool_created_at or ""
+                    
+                    items.append(
+                        {
+                            "chain": chain,
+                            "pool": pool_id,
+                            "url": _cmc_pool_url_hint(pool_id),
+                            "baseSymbol": (token_side.get("symbol") or ""),
+                            "baseAddr": (token_side.get("address") or ""),
+                            "quoteSymbol": (native_side.get("symbol") or ""),
+                            "quoteAddr": (native_side.get("address") or ""),
+                            "liquidity": float(liquidity or 0.0),
+                            "tx24h": int(tx24h or 0),
+                            "pool_created_at": pool_created_at or "",
+                            "volume_24h": volume_24h,
+                            "listed_at": listed_at,
+                        }
+                    )
+                pages_done += 1
+                return items
+                
+            except Exception as e:
+                last_error = e
+                # Check if it's a 400 error - if so, try next variant
+                if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                    if e.response.status_code == 400:
+                        print(f"[{chain}] CMC {s} 400 with chain_slug={cmc_chain}, trying next variant...")
+                        continue
+                # For other errors, log and try next variant
+                print(f"[{chain}] CMC {s} error with chain_slug={cmc_chain}: {e}")
+                continue
         
-        data = doc.get("data") or doc.get("result") or doc.get("items") or []
-        items: list[dict] = []
-        seen: set[str] = set()
-        for pool in data:
-            pool_id, base_tok, quote_tok, liquidity, tx24h, pool_created_at = _extract_common_fields(pool)
-            if not pool_id or pool_id in seen:
-                continue
-            seen.add(pool_id)
-            scanned_pairs += 1
-            ok, token_side, native_side = is_token_native_pair(chain, base_tok, quote_tok)
-            if not ok:
-                continue
-            if not is_base_token_acceptable(chain, token_side):
-                continue
-            if not pool_data_filters(liquidity, cfg.liquidity_min, cfg.liquidity_max, tx24h, cfg.tx24h_max):
-                continue
-            items.append(
-                {
-                    "chain": chain,
-                    "pool": pool_id,
-                    "url": _cmc_pool_url_hint(pool_id),
-                    "baseSymbol": (token_side.get("symbol") or ""),
-                    "baseAddr": (token_side.get("address") or ""),
-                    "quoteSymbol": (native_side.get("symbol") or ""),
-                    "quoteAddr": (native_side.get("address") or ""),
-                    "liquidity": float(liquidity or 0.0),
-                    "tx24h": int(tx24h or 0),
-                    "pool_created_at": pool_created_at or "",
-                }
-            )
+        # All variants failed
+        if last_error:
+            print(f"[{chain}] CMC {s} all chain_slug variants failed: {last_error}")
         pages_done += 1
-        return items
+        return []
 
-    if s in {"new", "trending", "pools"}:
+    if s in {"new", "trending", "pools", "all"}:
+        # CMC DEX v4: removed category parameter
+        # Fetch all pools, then sort locally based on source type
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-            # CMC DEX v4 discovery endpoint
-            # /v4/dex/spot-pairs/latest?chain_slug={chain}&category={new|trending|all}&page={page}&limit={limit}
-            category = "new" if s == "new" else "trending" if s == "trending" else "all"
-            url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category={category}&page={page}&limit={cfg.cmc_page_size}"
-            items = _fetch_page(url, page)
+            url_template = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={{chain_slug}}&page={page}&limit={cfg.cmc_page_size}"
+            items = _fetch_page_with_fallback(url_template, page)
             if items:
                 out.extend(items)
     elif s == "dexes":
-        # CMC DEX v4: list dexes for chain
-        dexes_url = f"{cfg.cmc_dex_base}/dexes?chain_slug={cmc_chain}"
-        try:
-            doc = http.cmc_get_json(dexes_url, timeout=20.0) or {}
-            dex_items = doc.get("data") or doc.get("result") or []
-        except Exception:
-            dex_items = []
+        # CMC DEX v4: list dexes for chain, then fetch pairs per dex
         dex_ids: list[str] = []
-        for d in dex_items:
-            _id = (d.get("id") or d.get("dex_id") or d.get("slug") or "").strip()
-            if _id:
-                dex_ids.append(_id)
+        for cmc_chain in cmc_chain_variants:
+            dexes_url = f"{cfg.cmc_dex_base}/dexes?chain_slug={cmc_chain}"
+            try:
+                doc = http.cmc_get_json(dexes_url, timeout=20.0) or {}
+                dex_items = doc.get("data") or doc.get("result") or []
+                if dex_items:
+                    for d in dex_items:
+                        _id = (d.get("id") or d.get("dex_id") or d.get("slug") or "").strip()
+                        if _id:
+                            dex_ids.append(_id)
+                    break  # Success, stop trying variants
+            except Exception as e:
+                print(f"[{chain}] CMC dexes list error with chain_slug={cmc_chain}: {e}")
+                continue
+        
+        # Fetch pairs per dex (without category)
         for dex_id in dex_ids:
             for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-                url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&dex_id={dex_id}&page={page}&limit={cfg.cmc_page_size}"
-                items = _fetch_page(url, page)
+                url_template = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={{chain_slug}}&dex_id={dex_id}&page={page}&limit={cfg.cmc_page_size}"
+                items = _fetch_page_with_fallback(url_template, page)
                 if items:
                     out.extend(items)
     else:
-        # treat as general pools (all category)
+        # Unknown source - treat as general pools
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-            url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=all&page={page}&limit={cfg.cmc_page_size}"
-            items = _fetch_page(url, page)
+            url_template = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={{chain_slug}}&page={page}&limit={cfg.cmc_page_size}"
+            items = _fetch_page_with_fallback(url_template, page)
             if items:
                 out.extend(items)
+
+    # Local sorting based on source type (since category param is removed)
+    if s == "new":
+        # Sort by listed_at / pool_created_at descending (newest first)
+        out.sort(key=lambda x: x.get("listed_at") or x.get("pool_created_at") or "", reverse=True)
+    elif s == "trending":
+        # Sort by volume_24h descending (highest volume first)
+        out.sort(key=lambda x: float(x.get("volume_24h") or 0.0), reverse=True)
+    # else: "all" or other sources - keep as returned by API
 
     # de-duplicate by pool id
     dedup: Dict[str, dict] = {}

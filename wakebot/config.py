@@ -100,6 +100,8 @@ class Config:
     
     # Chain slug mapping for CMC API
     chain_slugs: dict[str, str] | None = None
+    # Chain slug fallback variants (multiple options to try on 400)
+    cmc_chain_slugs: dict[str, list[str]] | None = None
     
     # Legacy revival configuration (kept for tests/back-compat)
     revival_enabled: bool = True
@@ -247,12 +249,20 @@ class Config:
         cfg.gecko_sources_list = [s.strip() for s in (cfg.gecko_sources or "").split(",") if s.strip()]
         cfg.cmc_sources_list = [s.strip() for s in (cfg.cmc_sources or "").split(",") if s.strip()]
         
-        # Chain slug mapping for CMC DEX API
+        # Chain slug mapping for CMC DEX API (with fallback variants)
         cfg.chain_slugs = {
             "base": "base",
             "ethereum": "ethereum",
             "solana": "solana",
             "bsc": "bnb",  # CMC uses 'bnb' for BSC chain
+        }
+        
+        # Chain slug fallback variants for CMC DEX API v4 (try multiple on 400)
+        cfg.cmc_chain_slugs = {
+            "ethereum": ["ethereum"],
+            "solana": ["solana"],
+            "base": ["base", "basescan", "base-mainnet"],
+            "bsc": ["bnb", "bsc", "binance-smart-chain"],
         }
 
         # Attach revival config

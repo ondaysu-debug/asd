@@ -188,6 +188,14 @@ class HttpClient:
             r = session.get(url, timeout=timeout)
             status = r.status_code
             self._cmc_limiter.record_status(status)
+            
+            # Log short response body for 4xx errors (helps debugging)
+            if 400 <= status < 500:
+                try:
+                    body_snippet = r.text[:600] if r.text else ""
+                    self._log(f"[cmc] {status} error: {body_snippet}")
+                except Exception:
+                    pass
 
             # Respect Retry-After for 429
             if status == 429:
