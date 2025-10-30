@@ -82,6 +82,10 @@ class HttpClient:
         self._cycle_penalty = 0.0
         self._cycle_429 = 0
         # preserve current effective RPS
+    
+    def reset_cycle_metrics(self) -> None:
+        """Alias for reset_cycle_counters() - reset per-cycle req/429/penalty metrics"""
+        self.reset_cycle_counters()
 
     def get_cycle_requests(self) -> int:
         return int(self._cycle_requests)

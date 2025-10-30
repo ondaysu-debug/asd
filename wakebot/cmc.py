@@ -9,10 +9,6 @@ from .config import Config
 from .net_http import HttpClient
 
 
-# Data quality threshold for logging discrepancies between CMC and GT
-DQ_DISCREPANCY_THRESHOLD = 0.25  # 25%
-
-
 # TTL cache for CMC OHLCV 25h per (chain, pool) -> (vol1h, prev24h, ok_age)
 _CMC_OHLCV_CACHE: Dict[tuple[str, str], tuple[float, tuple[float, float, bool]]] = {}
 _CMC_OHLCV_LOCK = threading.Lock()
@@ -92,10 +88,12 @@ def _validate_cmc_ohlcv_doc(doc: dict, pool_id: str = "") -> list:
             raise ValueError(f"CMC OHLCV: candle[{i}] not a list/tuple")
         if len(c) < 6:
             raise ValueError(f"CMC OHLCV: candle[{i}] has {len(c)} elements, expected >= 6")
-        # Validate numeric types for OHLCV values
+        # Validate and convert OHLCV values to float [o,h,l,c,v at indices 1-5]
         for j in range(1, 6):
-            if not isinstance(c[j], (int, float)):
-                raise ValueError(f"CMC OHLCV: candle[{i}][{j}] not numeric")
+            try:
+                float(c[j])
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"CMC OHLCV: candle[{i}][{j}] cannot convert to float: {e}")
     
     return candles
 
@@ -225,7 +223,7 @@ def _fallback_gt_ohlcv_25h(
         
         # Data quality logging if we have CMC data to compare
         if cmc_vol1h > 0 or cmc_prev24h > 0:
-            _log_data_quality(chain, pool_id, cmc_vol1h, vol1h_gt, cmc_prev24h, prev24h_gt)
+            _log_data_quality(cfg, chain, pool_id, cmc_vol1h, vol1h_gt, cmc_prev24h, prev24h_gt)
         
         return (vol1h_gt, prev24h_gt, ok_age)
     except Exception as e:
@@ -234,6 +232,7 @@ def _fallback_gt_ohlcv_25h(
 
 
 def _log_data_quality(
+    cfg: Config,
     chain: str,
     pool_id: str,
     vol1h_cmc: float,
@@ -243,6 +242,7 @@ def _log_data_quality(
 ) -> None:
     """Log data quality comparison between CMC and GT"""
     try:
+        threshold = float(cfg.dq_discrepancy_threshold)
         # Calculate absolute and relative differences
         dv1 = abs(vol1h_cmc - vol1h_gt)
         dv1_rel = dv1 / max(1.0, vol1h_cmc) if vol1h_cmc > 0 else 0.0
@@ -257,7 +257,7 @@ def _log_data_quality(
         )
         
         # Warning if discrepancy exceeds threshold
-        if dv1_rel > DQ_DISCREPANCY_THRESHOLD or dprev_rel > DQ_DISCREPANCY_THRESHOLD:
-            print(f"[dq][warn] ⚠️  discrepancy >{int(DQ_DISCREPANCY_THRESHOLD*100)}% for {chain}/{pool_id}")
+        if dv1_rel > threshold or dprev_rel > threshold:
+            print(f"[dq][warn] ⚠️  discrepancy >{int(threshold*100)}% for {chain}/{pool_id}")
     except Exception as e:
         print(f"[dq] error logging quality for {chain}/{pool_id}: {e}")
