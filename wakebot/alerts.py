@@ -108,15 +108,16 @@ def maybe_alert(
     # source_tag provided by get_window_stats
 
     text = (
-        f"🚨 WAKE-UP ({meta.chain.capitalize()})\n"
-        f"Pool: {_escape_md(meta.pool)}\n"
-        f"Token: {_escape_md(meta.token_symbol or 'n/a')}\n"
-        f"Contract: `{_escape_md(meta.token_addr or 'n/a')}`\n"
+        f"🚨 WAKE-UP ({_escape_markdown(meta.chain.capitalize())})\n"
+        f"Pool: {_escape_markdown(meta.pool)}\n"
+        f"Token: {_escape_markdown(meta.token_symbol or 'n/a')}\n"
+        f"Contract: `{_escape_markdown(meta.token_addr or 'n/a')}`\n"
         f"Liquidity: ${_nice(meta.liquidity)}\n"
-        f"1h Vol: ${_nice(vol1h)} ({source_tag})\n"
+        f"1h Vol: ${_nice(vol1h)}\n"
         f"Prev 48h Vol (excl. current 1h): ${_nice(prev48)}\n"
         f"Ratio 1h/prev48h: {ratio:.2f}x\n"
-        f"Link: {_escape_md(meta.url)}"
+        f"Source: {_escape_markdown(source_tag)}\n"
+        f"Link: {_escape_markdown(meta.url)}"
     )
     notifier.send(text)
     return {"probed": True, "probed_ok": True, "alert": True}
@@ -166,7 +167,7 @@ def should_revival(w: RevivalWindow, cfg: Config) -> bool:
 def build_revival_text(meta: AlertInputs, chain_label: str, w: RevivalWindow) -> str:
     ratio = (w.now_24h / w.prev_week) if w.prev_week > 0 else float("inf")
     return (
-        f"🚨 REVIVAL ({chain_label})\n"
+        f"🚨 REVIVAL ({_escape_markdown(chain_label)})\n"
         f"Pool: {_escape_markdown(meta.pool)}\n"
         f"Token: {_escape_markdown(meta.token_symbol or 'n/a')}\n"
         f"Contract: `{_escape_markdown(meta.token_addr or 'n/a')}`\n"
@@ -174,6 +175,7 @@ def build_revival_text(meta: AlertInputs, chain_label: str, w: RevivalWindow) ->
         f"Now 24h Vol: ${_nice(w.now_24h)}\n"
         f"Prev 7d (excl. last 24h): ${_nice(w.prev_week)}\n"
         f"Ratio now/prev7d: {ratio:.2f}x\n"
+        f"Source: GeckoTerminal OHLCV\n"
         f"Link: https://www.geckoterminal.com/{_escape_markdown(meta.chain)}/pools/{_escape_markdown(meta.pool)}"
     )
 
@@ -196,7 +198,7 @@ def build_revival_text_cmc(meta: AlertInputs, chain_label: str, vol1h: float, pr
     """
     ratio = (float(vol1h) / float(prev24h)) if float(prev24h) > 0 else float("inf")
     return (
-        f"🚨 REVIVAL ({chain_label})\n"
+        f"🚨 REVIVAL ({_escape_markdown(chain_label)})\n"
         f"Pool: {_escape_markdown(meta.pool)}\n"
         f"Token: {_escape_markdown(meta.token_symbol or 'n/a')}\n"
         f"Contract: `{_escape_markdown(meta.token_addr or 'n/a')}`\n"
@@ -204,6 +206,6 @@ def build_revival_text_cmc(meta: AlertInputs, chain_label: str, vol1h: float, pr
         f"1h Vol: ${_nice(vol1h)}\n"
         f"Prev 24h Vol: ${_nice(prev24h)}\n"
         f"Ratio 1h/prev24h: {ratio:.2f}x\n"
-        f"Source: {source}\n"
+        f"Source: {_escape_markdown(source)}\n"
         f"Link: {_escape_markdown(meta.url)}"
     )

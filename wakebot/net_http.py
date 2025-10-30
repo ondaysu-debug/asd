@@ -82,6 +82,10 @@ class HttpClient:
         self._cycle_penalty = 0.0
         self._cycle_429 = 0
         # preserve current effective RPS
+    
+    def reset_cycle_metrics(self) -> None:
+        """Alias for reset_cycle_counters() - reset per-cycle req/429/penalty metrics"""
+        self.reset_cycle_counters()
 
     def get_cycle_requests(self) -> int:
         return int(self._cycle_requests)
@@ -226,6 +230,16 @@ class HttpClient:
                 self._cycle_requests += 1
             except Exception:
                 self._cycle_requests = int(self._cycle_requests) + 1
+    
+    # ----- Rate limiter health monitoring -----
+    def log_ratelimit_health(self, prefix: str = "cmc") -> None:
+        """Log rate limiter health snapshot"""
+        limiter = self._cmc_limiter if prefix.lower() == "cmc" else self._limiter
+        snap = limiter.snapshot()
+        self._log(
+            f"[rl:{prefix}] rps={snap['effective_rps']} tokens={snap['tokens']} "
+            f"p429%={snap['p429_pct']} conc={snap['concurrency']}"
+        )
 
 
 def _parse_retry_after(value: str) -> Optional[float]:

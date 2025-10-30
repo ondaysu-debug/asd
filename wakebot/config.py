@@ -78,6 +78,9 @@ class Config:
     alert_ratio_min: float
     min_prev24_usd: float
     revival_min_age_days: int
+    
+    # Data quality threshold for CMC vs GT comparison
+    dq_discrepancy_threshold: float
 
     # Seen-cache for OHLCV budget saving
     seen_ttl_min: int
@@ -114,10 +117,10 @@ class Config:
         tg_parse_mode = os.getenv("TG_PARSE_MODE", "Markdown")
 
         # API bases
-        # CMC DEX API v3 (dexer) - free tier endpoint
-        # NOTE: Update to /v4/dex if v4 becomes available and documented
-        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://api.coinmarketcap.com/dexer/v3")
-        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://pro-api.coinmarketcap.com/dexer/v3")
+        # CMC DEX API v4 (actual as of 2025)
+        # Endpoints: /v4/dex/spot-pairs/latest (discovery), /v4/dex/pairs/ohlcv/latest (OHLCV)
+        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://api.coinmarketcap.com/v4/dex")
+        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://pro-api.coinmarketcap.com/v4/dex")
         cmc_api_key = os.getenv("CMC_API_KEY", "")
         gecko_base = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2")
         allow_gt_ohlcv_fallback = _as_bool(os.getenv("ALLOW_GT_OHLCV_FALLBACK", "false"))
@@ -171,6 +174,7 @@ class Config:
         alert_ratio_min = float(os.getenv("ALERT_RATIO_MIN", "1.0"))
         min_prev24_usd = float(os.getenv("MIN_PREV24_USD", "1000"))
         revival_min_age_days = int(os.getenv("REVIVAL_MIN_AGE_DAYS", "7"))
+        dq_discrepancy_threshold = float(os.getenv("DQ_DISCREPANCY_THRESHOLD", "0.25"))
         # Prefer minutes var; fall back to seconds
         seen_ttl_min = int(os.getenv("SEEN_TTL_MIN", "15"))
         seen_ttl_sec_env = os.getenv("SEEN_TTL_SEC")
@@ -231,6 +235,7 @@ class Config:
             alert_ratio_min=alert_ratio_min,
             min_prev24_usd=min_prev24_usd,
             revival_min_age_days=revival_min_age_days,
+            dq_discrepancy_threshold=dq_discrepancy_threshold,
             seen_ttl_min=seen_ttl_min,
             seen_ttl_sec=seen_ttl_sec,
             save_candidates=save_candidates,

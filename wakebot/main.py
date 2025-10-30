@@ -19,10 +19,60 @@ from .net_http import HttpClient
 from .storage import Storage
 
 
-def health_check(cfg: Config, http: HttpClient, logger=print) -> bool:
+def health_check(cfg: Config, logger=print) -> bool:
     """
-    Quick self-test: check CMC discovery and OHLCV availability
-    (minimal limits, no side effects).
+    Offline health check: validates configuration and dependencies without network calls.
+    Returns True/False and prints brief report.
+    """
+    ok = True
+    try:
+        # 1) Check config essentials
+        if not cfg.chains or len(cfg.chains) == 0:
+            logger("[health] FAIL: no chains configured")
+            ok = False
+        else:
+            logger(f"[health] chains: {', '.join(cfg.chains)} - OK")
+        
+        if not cfg.cmc_dex_base:
+            logger("[health] FAIL: CMC_DEX_BASE not configured")
+            ok = False
+        else:
+            logger(f"[health] cmc_dex_base: {cfg.cmc_dex_base} - OK")
+        
+        if not cfg.cmc_api_key:
+            logger("[health] WARN: CMC_API_KEY not set (may limit API access)")
+        else:
+            logger(f"[health] cmc_api_key: ***{cfg.cmc_api_key[-4:]} - OK")
+        
+        # 2) Check budget params
+        if cfg.cmc_calls_per_min <= 0:
+            logger("[health] FAIL: CMC_CALLS_PER_MIN must be > 0")
+            ok = False
+        else:
+            logger(f"[health] cmc_calls_per_min: {cfg.cmc_calls_per_min} - OK")
+        
+        # 3) Check DB path writability
+        try:
+            db_parent = cfg.db_path.parent
+            if not db_parent.exists():
+                db_parent.mkdir(parents=True, exist_ok=True)
+            logger(f"[health] db_path: {cfg.db_path} - OK")
+        except Exception as e:
+            logger(f"[health] db_path: {cfg.db_path} - FAIL ({e})")
+            ok = False
+        
+        logger(f"[health] offline check: {'PASS' if ok else 'FAIL'}")
+    
+    except Exception as e:
+        logger(f"[health] error: {type(e).__name__}: {e}")
+        ok = False
+    
+    return ok
+
+
+def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
+    """
+    Online health check: mini-ping to CMC API (1 discovery page + 1 OHLCV).
     Returns True/False and prints brief report.
     """
     ok = True
@@ -32,8 +82,8 @@ def health_check(cfg: Config, http: HttpClient, logger=print) -> bool:
         cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
         
         # Light discovery call (1 page, limit=5)
-        # NOTE: Update endpoint if actual CMC API differs
-        discovery_url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools/new?page=1&page_size=5"
+        # CMC DEX v4 endpoint
+        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=new&page=1&limit=5"
         try:
             doc = http.cmc_get_json(discovery_url, timeout=10.0) or {}
             ok = ok and bool(doc.get("data"))
@@ -60,7 +110,7 @@ def health_check(cfg: Config, http: HttpClient, logger=print) -> bool:
             pass
         
         if pair_id:
-            ohlcv_url = f"{cfg.cmc_dex_base}/{cmc_chain}/pairs/{pair_id}/ohlcv/latest?timeframe=1h&aggregate=1&limit=2"
+            ohlcv_url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?chain_slug={cmc_chain}&pair_address={pair_id}&timeframe=1h&aggregate=1&limit=2"
             try:
                 ohlcv = http.cmc_get_json(ohlcv_url, timeout=10.0) or {}
                 ok = ok and bool(ohlcv.get("data"))
@@ -97,8 +147,8 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
     cycle_ok = True
     first_error = None
 
-    # start cycle accounting for HTTP
-    http.reset_cycle_counters()
+    # Reset per-cycle metrics for HTTP requests/429/penalty
+    http.reset_cycle_metrics()
 
     # discovery across chains using configured CMC sources and progress cursors
     aggregated: list[dict] = []
@@ -132,7 +182,13 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
     total_budget = int(cfg.cmc_calls_per_min * (cfg.loop_seconds / 60.0))
     discovery_cost = sum(int((per_chain_stats.get(ch, {}) or {}).get("pages_planned", 0)) for ch in (cfg.chains or []))
     spent_so_far = int(http.get_cycle_requests() + http.get_cycle_penalty())
-    base_available = max(0, total_budget - discovery_cost - int(cfg.cmc_safety_budget))
+    
+    # Reserve 2-3 requests for GT fallback if enabled
+    gt_reserve = 0
+    if cfg.allow_gt_ohlcv_fallback:
+        gt_reserve = 3
+    
+    base_available = max(0, total_budget - discovery_cost - int(cfg.cmc_safety_budget) - gt_reserve)
     available_for_ohlcv = max(0, base_available - spent_so_far)
     ohlcv_budget = int(min(available_for_ohlcv, cfg.max_ohlcv_probes_cap))
     if available_for_ohlcv > 0:
@@ -141,7 +197,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
         ohlcv_budget = 0
     print(
         f"[budget] total={total_budget}, discovery_cost={discovery_cost}, spent={spent_so_far}, "
-        f"avail_ohlcv={available_for_ohlcv}, cap={cfg.max_ohlcv_probes_cap}, final_ohlcv_budget={ohlcv_budget}"
+        f"gt_reserve={gt_reserve}, avail_ohlcv={available_for_ohlcv}, cap={cfg.max_ohlcv_probes_cap}, final_ohlcv_budget={ohlcv_budget}"
     )
 
     # seen-cache per chain to avoid wasting OHLCV budget on recently probed pools
@@ -261,6 +317,11 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
         f"penalty={http.get_cycle_penalty():.2f}s rps≈{http.get_effective_rps():.2f}"
     )
     
+    # Rate limiter health monitoring
+    http.log_ratelimit_health("cmc")
+    if cfg.allow_gt_ohlcv_fallback:
+        http.log_ratelimit_health("gt")
+    
     # Health summary
     discovery_pages_done = sum(int((per_chain_stats.get(ch, {}) or {}).get("pages_done", 0)) for ch in (cfg.chains or []))
     discovery_pages_planned = sum(int((per_chain_stats.get(ch, {}) or {}).get("pages_planned", 0)) for ch in (cfg.chains or []))
@@ -289,16 +350,25 @@ def pick_sources(cfg: Config, cycle_idx: int) -> list[str]:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true", help="run single cycle and exit")
-    parser.add_argument("--health", action="store_true", help="run health check and exit")
+    parser.add_argument("--health", action="store_true", help="run offline health check (config validation) and exit")
+    parser.add_argument("--health-online", action="store_true", help="run online health check (mini-ping to CMC API) and exit")
     args = parser.parse_args(argv)
 
     cfg = Config.load()
 
-    # Health check mode
+    # Health check mode (offline: no network calls)
     if args.health:
+        print("[health] Running offline health check (config validation)...")
+        ok = health_check(cfg, logger=print)
+        print(f"[health] Result: {'PASS' if ok else 'FAIL'}")
+        import sys
+        sys.exit(0 if ok else 1)
+    
+    # Health check online mode (with network ping)
+    if args.health_online:
         http = HttpClient(cfg)
-        print("[health] Running health check...")
-        ok = health_check(cfg, http, logger=print)
+        print("[health] Running online health check (CMC API ping)...")
+        ok = health_check_online(cfg, http, logger=print)
         print(f"[health] Result: {'PASS' if ok else 'FAIL'}")
         import sys
         sys.exit(0 if ok else 1)
