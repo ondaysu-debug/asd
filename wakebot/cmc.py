@@ -9,12 +9,12 @@ from .config import Config
 from .net_http import HttpClient
 
 
-# TTL cache for CMC OHLCV 25h per (chain, pool) -> (vol1h, prev24h, ok_age)
-_CMC_OHLCV_CACHE: Dict[tuple[str, str], tuple[float, tuple[float, float, bool]]] = {}
+# TTL cache for CMC OHLCV 25h per (chain, pool) -> (vol1h, prev24h, ok_age, source)
+_CMC_OHLCV_CACHE: Dict[tuple[str, str], tuple[float, tuple[float, float, bool, str]]] = {}
 _CMC_OHLCV_LOCK = threading.Lock()
 
 
-def _get_cached_cmc_ohlcv(key: tuple[str, str], ttl: int) -> tuple[float, float, bool] | None:
+def _get_cached_cmc_ohlcv(key: tuple[str, str], ttl: int) -> tuple[float, float, bool, str] | None:
     now = time.time()
     with _CMC_OHLCV_LOCK:
         item = _CMC_OHLCV_CACHE.get(key)
@@ -28,7 +28,7 @@ def _get_cached_cmc_ohlcv(key: tuple[str, str], ttl: int) -> tuple[float, float,
         return None
 
 
-def _set_cached_cmc_ohlcv(key: tuple[str, str], value: tuple[float, float, bool]) -> None:
+def _set_cached_cmc_ohlcv(key: tuple[str, str], value: tuple[float, float, bool, str]) -> None:
     with _CMC_OHLCV_LOCK:
         _CMC_OHLCV_CACHE[key] = (time.time(), value)
 
@@ -105,11 +105,12 @@ def fetch_cmc_ohlcv_25h(
     pool_id: str,
     cache,  # GeckoCache instance for fallback
     pool_created_at: str | None = None,
-) -> tuple[float, float, bool]:
+) -> tuple[float, float, bool, str]:
     """
-    Fetch 25 hourly candles from CMC DEX API and return (vol1h, prev24h, ok_age).
+    Fetch 25 hourly candles from CMC DEX API and return (vol1h, prev24h, ok_age, source).
     
     ok_age = True if pool age > cfg.revival_min_age_days
+    source = "CMC DEX" or "CMC→GT fallback" or "GeckoTerminal OHLCV"
     
     CMC DEX endpoint (actual as of 2025): 
     GET {cmc_dex_base}/{chain}/pairs/{pool_id}/ohlcv/latest
@@ -121,7 +122,9 @@ def fetch_cmc_ohlcv_25h(
     key = (f"cmc25:{chain}", pool_id)
     cached = _get_cached_cmc_ohlcv(key, int(cfg.gecko_ttl_sec))
     if cached is not None:
-        return cached
+        # Cached value includes source tag
+        vol1h, prev24h, ok_age, source = cached
+        return (vol1h, prev24h, ok_age, source)
 
     cmc_chain = _normalize_cmc_chain(cfg, chain)
     
@@ -140,7 +143,7 @@ def fetch_cmc_ohlcv_25h(
             print(f"[cmc][validate] {ve} for pair={pool_id}; fallback? {cfg.allow_gt_ohlcv_fallback}")
             if cfg.allow_gt_ohlcv_fallback:
                 return _fallback_gt_ohlcv_25h(cfg, http, chain, pool_id, cache, pool_created_at)
-            val = (0.0, 0.0, False)
+            val = (0.0, 0.0, False, "CMC DEX")
             _set_cached_cmc_ohlcv(key, val)
             return val
         
@@ -149,7 +152,7 @@ def fetch_cmc_ohlcv_25h(
             if cfg.allow_gt_ohlcv_fallback:
                 print(f"[cmc→gt] {chain}/{pool_id}: CMC empty, fallback to GT")
                 return _fallback_gt_ohlcv_25h(cfg, http, chain, pool_id, cache, pool_created_at)
-            val = (0.0, 0.0, False)
+            val = (0.0, 0.0, False, "CMC DEX")
             _set_cached_cmc_ohlcv(key, val)
             return val
 
@@ -184,7 +187,7 @@ def fetch_cmc_ohlcv_25h(
             except (IndexError, TypeError, ValueError, OSError):
                 ok_age = False
 
-        val = (float(vol1h), float(prev24h), ok_age)
+        val = (float(vol1h), float(prev24h), ok_age, "CMC DEX")
         _set_cached_cmc_ohlcv(key, val)
         return val
 
@@ -194,7 +197,7 @@ def fetch_cmc_ohlcv_25h(
         if cfg.allow_gt_ohlcv_fallback:
             print(f"[cmc→gt] {chain}/{pool_id}: CMC exception, fallback to GT")
             return _fallback_gt_ohlcv_25h(cfg, http, chain, pool_id, cache, pool_created_at)
-        val = (0.0, 0.0, False)
+        val = (0.0, 0.0, False, "CMC DEX")
         _set_cached_cmc_ohlcv(key, val)
         return val
 
@@ -208,10 +211,10 @@ def _fallback_gt_ohlcv_25h(
     pool_created_at: str | None,
     cmc_vol1h: float = 0.0,
     cmc_prev24h: float = 0.0,
-) -> tuple[float, float, bool]:
+) -> tuple[float, float, bool, str]:
     """
     Fallback to GeckoTerminal OHLCV 25h with age check.
-    Returns (vol1h, prev24h, ok_age)
+    Returns (vol1h, prev24h, ok_age, source)
     
     If cmc_vol1h/cmc_prev24h provided, log data quality comparison.
     """
@@ -225,10 +228,10 @@ def _fallback_gt_ohlcv_25h(
         if cmc_vol1h > 0 or cmc_prev24h > 0:
             _log_data_quality(cfg, chain, pool_id, cmc_vol1h, vol1h_gt, cmc_prev24h, prev24h_gt)
         
-        return (vol1h_gt, prev24h_gt, ok_age)
+        return (vol1h_gt, prev24h_gt, ok_age, "CMC→GT fallback")
     except Exception as e:
         print(f"[gt] {chain}/{pool_id} fallback error: {type(e).__name__}: {e}")
-        return (0.0, 0.0, False)
+        return (0.0, 0.0, False, "GeckoTerminal OHLCV")
 
 
 def _log_data_quality(

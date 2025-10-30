@@ -182,9 +182,9 @@ class HttpClient:
             time.sleep(min(sleep_for, 5.0))
         try:
             session = self._session()
-            # ensure header on each request
-            if self._cfg.cmc_api_key:
-                session.headers["X-CMC_PRO_API_KEY"] = self._cfg.cmc_api_key
+            # Always ensure API key header is present
+            session.headers["X-CMC_PRO_API_KEY"] = self._cfg.cmc_api_key or ""
+            
             r = session.get(url, timeout=timeout)
             status = r.status_code
             self._cmc_limiter.record_status(status)
@@ -212,20 +212,7 @@ class HttpClient:
                 else:
                     # No Retry-After header, count minimal penalty
                     self.add_penalty(0.5)
-
-            # If unauthorized/forbidden or persistent 404, try ALT base once
-            if status in (401, 403) or status == 404:
-                try_alt = False
-                base = self._cfg.cmc_dex_base.rstrip("/")
-                alt = self._cfg.cmc_dex_base_alt.rstrip("/")
-                if url.startswith(base) and alt:
-                    try_alt = True
-                if try_alt:
-                    alt_url = url.replace(base, alt, 1)
-                    self._log(f"[cmc] retry via ALT base: {alt_url}")
-                    r = session.get(alt_url, timeout=timeout)
-                    status = r.status_code
-                    self._cmc_limiter.record_status(status)
+            
             r.raise_for_status()
             try:
                 return r.json() or {}
