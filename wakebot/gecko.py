@@ -111,6 +111,72 @@ def fetch_gt_ohlcv_25h(cfg: Config, http: HttpClient, chain: str, pool_id: str, 
         return val
 
 
+def fetch_gt_ohlcv_25h_with_age(
+    cfg: Config,
+    http: HttpClient,
+    chain: str,
+    pool_id: str,
+    cache: GeckoCache,
+    pool_created_at: str | None = None,
+) -> tuple[float, float, bool]:
+    """
+    Fetch 25 hourly candles from GeckoTerminal and return (vol1h, prev24h, ok_age).
+    
+    ok_age = True if pool age > cfg.revival_min_age_days
+    Age is checked via pool_created_at if provided, otherwise by first candle timestamp.
+    """
+    key = (f"gt25_age:{chain}", pool_id)
+    
+    # Use separate cache for age-aware variant
+    from .cmc import _get_cached_cmc_ohlcv, _set_cached_cmc_ohlcv
+    
+    cached = _get_cached_cmc_ohlcv(key, int(cfg.gecko_ttl_sec))
+    if cached is not None:
+        return cached
+
+    gt_chain = _normalize_gt_chain(chain)
+    url = f"{cfg.gecko_base}/networks/{gt_chain}/pools/{pool_id}/ohlcv/hour?aggregate=1&limit=25"
+
+    now_dt = datetime.now(timezone.utc)
+    try:
+        doc = http.gt_get_json(url, timeout=20.0)
+        attrs = ((doc or {}).get("data") or {}).get("attributes") or {}
+        candles = attrs.get("ohlcv_list") or attrs.get("candles") or []
+        if len(candles) < 2:
+            val = (0.0, 0.0, False)
+            _set_cached_cmc_ohlcv(key, val)
+            return val
+
+        # candle format: [ts, o, h, l, c, v]
+        vol1h = float(candles[-1][5])
+        prev_window = candles[-25:-1] if len(candles) >= 25 else candles[:-1]
+        prev24 = sum(float(c[-1]) for c in prev_window)
+
+        # Age check: prefer pool_created_at if available
+        ok_age = False
+        if pool_created_at:
+            created_dt = _parse_iso8601(pool_created_at)
+            if created_dt is not None:
+                ok_age = (now_dt - created_dt) >= timedelta(days=int(cfg.revival_min_age_days))
+        
+        # Fallback: check first candle timestamp
+        if not ok_age and candles:
+            try:
+                first_ts = int(candles[0][0])
+                first_dt = datetime.fromtimestamp(first_ts, tz=timezone.utc)
+                ok_age = (now_dt - first_dt) >= timedelta(days=int(cfg.revival_min_age_days))
+            except Exception:
+                ok_age = False
+
+        val = (vol1h, prev24, ok_age)
+        _set_cached_cmc_ohlcv(key, val)
+        return val
+    except Exception:
+        val = (0.0, 0.0, False)
+        _set_cached_cmc_ohlcv(key, val)
+        return val
+
+
 # ---------------- Revival window (24h vs previous 7d) ----------------
 
 @dataclass(slots=True)
