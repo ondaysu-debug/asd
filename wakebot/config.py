@@ -54,16 +54,16 @@ class Config:
     cmc_page_size: int
     # GT (legacy discovery; kept for tests/back-compat)
     gecko_sources: str
-    gecko_rotate_sources: bool = True
+    gecko_rotate_sources: bool
     gecko_pages_per_chain: int
-    gecko_dex_pages_per_chain: int = 1
+    gecko_dex_pages_per_chain: int
     gecko_page_size: int
 
     # Budget for OHLCV probes (dynamic per cycle)
-    max_ohlcv_probes_cap: int = 30
-    cmc_safety_budget: int = 4
-    gecko_safety_budget: int = 4  # legacy name (kept for back-compat)
-    min_ohlcv_probes: int = 3
+    max_ohlcv_probes_cap: int
+    cmc_safety_budget: int
+    gecko_safety_budget: int  # legacy name (kept for back-compat)
+    min_ohlcv_probes: int
     # Back-compat (tests and older code may still reference this)
     max_ohlcv_probes: int
 
@@ -78,9 +78,11 @@ class Config:
     alert_ratio_min: float
     min_prev24_usd: float
     revival_min_age_days: int
+    # Data quality logs
+    dq_warn_threshold: float
 
     # Seen-cache for OHLCV budget saving
-    seen_ttl_min: int = 15
+    seen_ttl_min: int
     # Back-compat (tests use seconds)
     seen_ttl_sec: int
 
@@ -94,6 +96,7 @@ class Config:
     # Helper properties (populated in load())
     gecko_sources_list: List[str] | None = None
     cmc_sources_list: List[str] | None = None
+    chain_slugs: dict[str, str] | None = None
     
     # Legacy revival configuration (kept for tests/back-compat)
     revival_enabled: bool = True
@@ -111,11 +114,11 @@ class Config:
         tg_parse_mode = os.getenv("TG_PARSE_MODE", "Markdown")
 
         # API bases
-        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://api.coinmarketcap.com/dexer/v3")
-        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://pro-api.coinmarketcap.com/dexer/v3")
+        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://pro-api.coinmarketcap.com")
+        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "")
         cmc_api_key = os.getenv("CMC_API_KEY", "")
         gecko_base = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2")
-        allow_gt_ohlcv_fallback = _as_bool(os.getenv("ALLOW_GT_OHLCV_FALLBACK", "false"))
+        allow_gt_ohlcv_fallback = _as_bool(os.getenv("ALLOW_GT_OHLCV_FALLBACK", "true"))
 
         # Filters
         liquidity_min = float(os.getenv("LIQUIDITY_MIN", "50000"))
@@ -166,6 +169,7 @@ class Config:
         alert_ratio_min = float(os.getenv("ALERT_RATIO_MIN", "1.0"))
         min_prev24_usd = float(os.getenv("MIN_PREV24_USD", "1000"))
         revival_min_age_days = int(os.getenv("REVIVAL_MIN_AGE_DAYS", "7"))
+        dq_warn_threshold = float(os.getenv("DQ_WARN_THRESHOLD", "0.25"))
         # Prefer minutes var; fall back to seconds
         seen_ttl_min = int(os.getenv("SEEN_TTL_MIN", "15"))
         seen_ttl_sec_env = os.getenv("SEEN_TTL_SEC")
@@ -226,6 +230,7 @@ class Config:
             alert_ratio_min=alert_ratio_min,
             min_prev24_usd=min_prev24_usd,
             revival_min_age_days=revival_min_age_days,
+            dq_warn_threshold=dq_warn_threshold,
             seen_ttl_min=seen_ttl_min,
             seen_ttl_sec=seen_ttl_sec,
             save_candidates=save_candidates,
@@ -243,4 +248,13 @@ class Config:
         cfg.revival_now_24h_min_usd = revival_now_24h_min_usd
         cfg.revival_ratio_min = revival_ratio_min
         cfg.revival_use_last_hours = revival_use_last_hours
+        
+        # Chain mapping for CMC
+        cfg.chain_slugs = {
+            "base": "base",
+            "ethereum": "ethereum", 
+            "solana": "solana",
+            "bsc": "bnb"  # CMC uses 'bnb' for BSC
+        }
+        
         return cfg
