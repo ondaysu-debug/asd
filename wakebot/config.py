@@ -114,10 +114,10 @@ class Config:
         tg_parse_mode = os.getenv("TG_PARSE_MODE", "Markdown")
 
         # API bases
-        # CMC DEX API v3 (dexer) - free tier endpoint
-        # NOTE: Update to /v4/dex if v4 becomes available and documented
-        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://api.coinmarketcap.com/dexer/v3")
-        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://pro-api.coinmarketcap.com/dexer/v3")
+        # CMC DEX API v4 (actual as of 2025)
+        # Endpoints: /v4/dex/spot-pairs/latest (discovery), /v4/dex/pairs/ohlcv/latest (OHLCV)
+        cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://api.coinmarketcap.com/v4/dex")
+        cmc_dex_base_alt = os.getenv("CMC_DEX_BASE_ALT", "https://pro-api.coinmarketcap.com/v4/dex")
         cmc_api_key = os.getenv("CMC_API_KEY", "")
         gecko_base = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2")
         allow_gt_ohlcv_fallback = _as_bool(os.getenv("ALLOW_GT_OHLCV_FALLBACK", "false"))

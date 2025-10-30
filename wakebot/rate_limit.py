@@ -124,3 +124,18 @@ class ApiRateLimiter:
     def get_rate(self) -> float:
         with self._lock:
             return self._effective_rps
+    
+    def snapshot(self) -> dict:
+        """Return current state snapshot for monitoring"""
+        with self._lock:
+            # Calculate 429 percentage from recent window
+            total = len(self._codes)
+            too_many = sum(1 for c in self._codes if c == 429) if self._codes else 0
+            p429_pct = (100.0 * too_many / total) if total > 0 else 0.0
+            
+            return {
+                "effective_rps": round(self._effective_rps, 3),
+                "tokens": round(self._tokens, 2),
+                "p429_pct": round(p429_pct, 1),
+                "concurrency": getattr(self._sem, "_value", None),
+            }

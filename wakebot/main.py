@@ -32,8 +32,8 @@ def health_check(cfg: Config, http: HttpClient, logger=print) -> bool:
         cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
         
         # Light discovery call (1 page, limit=5)
-        # NOTE: Update endpoint if actual CMC API differs
-        discovery_url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools/new?page=1&page_size=5"
+        # CMC DEX v4 endpoint
+        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=new&page=1&limit=5"
         try:
             doc = http.cmc_get_json(discovery_url, timeout=10.0) or {}
             ok = ok and bool(doc.get("data"))
@@ -60,7 +60,7 @@ def health_check(cfg: Config, http: HttpClient, logger=print) -> bool:
             pass
         
         if pair_id:
-            ohlcv_url = f"{cfg.cmc_dex_base}/{cmc_chain}/pairs/{pair_id}/ohlcv/latest?timeframe=1h&aggregate=1&limit=2"
+            ohlcv_url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?chain_slug={cmc_chain}&pair_address={pair_id}&timeframe=1h&aggregate=1&limit=2"
             try:
                 ohlcv = http.cmc_get_json(ohlcv_url, timeout=10.0) or {}
                 ok = ok and bool(ohlcv.get("data"))
@@ -260,6 +260,11 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
         f"[rate] req={http.get_cycle_requests()} 429={http.get_cycle_429()} "
         f"penalty={http.get_cycle_penalty():.2f}s rps≈{http.get_effective_rps():.2f}"
     )
+    
+    # Rate limiter health monitoring
+    http.log_ratelimit_health("cmc")
+    if cfg.allow_gt_ohlcv_fallback:
+        http.log_ratelimit_health("gt")
     
     # Health summary
     discovery_pages_done = sum(int((per_chain_stats.get(ch, {}) or {}).get("pages_done", 0)) for ch in (cfg.chains or []))

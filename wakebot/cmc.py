@@ -57,38 +57,47 @@ def _normalize_cmc_chain(cfg: Config, chain: str) -> str:
     return s
 
 
-def _validate_cmc_ohlcv_doc(doc: dict, pool_id: str = "") -> bool:
+def _validate_cmc_ohlcv_doc(doc: dict, pool_id: str = "") -> list:
     """
-    Validate CMC OHLCV response structure.
-    Expected: {"data": {"ohlcv": [[ts,o,h,l,c,v], ...]} or similar}
+    Strict validation of CMC OHLCV response structure.
+    Expected: {"data": {"attributes": {"candles": [[ts,o,h,l,c,v], ...]}}}
+    
+    Returns parsed candles array or raises ValueError on validation failure.
     """
     if not isinstance(doc, dict):
-        return False
+        raise ValueError("CMC OHLCV: response not a dict")
+    
     data_raw = doc.get("data")
-    if not data_raw:
-        return False
+    if not isinstance(data_raw, dict):
+        raise ValueError("CMC OHLCV: missing or invalid 'data' field")
+    
+    # Check for attributes
+    attrs = data_raw.get("attributes")
+    if not isinstance(attrs, dict):
+        raise ValueError("CMC OHLCV: missing 'data.attributes'")
     
     # Try multiple possible keys for candles
-    candles = None
-    if isinstance(data_raw, dict):
-        attrs = data_raw.get("attributes") or {}
-        candles = attrs.get("candles") or attrs.get("ohlcv_list") or attrs.get("ohlcv")
-    elif isinstance(data_raw, list):
-        candles = data_raw
+    candles = attrs.get("candles") or attrs.get("ohlcv_list") or attrs.get("ohlcv")
     
-    # Also check direct ohlcv key
+    # Fallback: check direct data keys
     if candles is None:
         candles = data_raw.get("ohlcv") or data_raw.get("ohlcv_list") or data_raw.get("candles")
     
     if not isinstance(candles, list):
-        return False
+        raise ValueError("CMC OHLCV: missing 'candles/ohlcv_list' or not a list")
     
-    # Each candle should be array of length >= 6 [ts,o,h,l,c,v]
-    for c in candles:
-        if not (isinstance(c, (list, tuple)) and len(c) >= 6):
-            return False
+    # Validate each candle structure: [ts, o, h, l, c, v]
+    for i, c in enumerate(candles):
+        if not isinstance(c, (list, tuple)):
+            raise ValueError(f"CMC OHLCV: candle[{i}] not a list/tuple")
+        if len(c) < 6:
+            raise ValueError(f"CMC OHLCV: candle[{i}] has {len(c)} elements, expected >= 6")
+        # Validate numeric types for OHLCV values
+        for j in range(1, 6):
+            if not isinstance(c[j], (int, float)):
+                raise ValueError(f"CMC OHLCV: candle[{i}][{j}] not numeric")
     
-    return True
+    return candles
 
 
 def fetch_cmc_ohlcv_25h(
@@ -118,36 +127,24 @@ def fetch_cmc_ohlcv_25h(
 
     cmc_chain = _normalize_cmc_chain(cfg, chain)
     
-    # CMC DEX OHLCV endpoint (actual as of 2025)
-    # Format: /dexer/v3/{chain}/pairs/{pool_id}/ohlcv/latest
-    # Params: timeframe=1h, aggregate=1, limit=25
-    url = f"{cfg.cmc_dex_base}/{cmc_chain}/pairs/{pool_id}/ohlcv/latest?timeframe=1h&aggregate=1&limit=25"
+    # CMC DEX OHLCV endpoint v4 (actual as of 2025)
+    # Format: /v4/dex/pairs/ohlcv/latest
+    # Params: chain_slug={chain}, pair_address={pool_id}, timeframe=1h, aggregate=1, limit=25
+    url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?chain_slug={cmc_chain}&pair_address={pool_id}&timeframe=1h&aggregate=1&limit=25"
     
     try:
         doc = http.cmc_get_json(url, timeout=20.0) or {}
         
-        # Validate response structure
-        if not _validate_cmc_ohlcv_doc(doc, pool_id):
-            print(f"[cmc][validate] unexpected ohlcv schema for pair={pool_id}; fallback? {cfg.allow_gt_ohlcv_fallback}")
+        # Strict validation: will raise ValueError on failure
+        try:
+            candles = _validate_cmc_ohlcv_doc(doc, pool_id)
+        except ValueError as ve:
+            print(f"[cmc][validate] {ve} for pair={pool_id}; fallback? {cfg.allow_gt_ohlcv_fallback}")
             if cfg.allow_gt_ohlcv_fallback:
                 return _fallback_gt_ohlcv_25h(cfg, http, chain, pool_id, cache, pool_created_at)
             val = (0.0, 0.0, False)
             _set_cached_cmc_ohlcv(key, val)
             return val
-        
-        # CMC response structure (adjust based on actual API):
-        # {"data": {"ohlcv": [[ts, o, h, l, c, v], ...]} or {"data": [candles]} }
-        data_raw = doc.get("data") or {}
-        
-        # Try multiple possible keys for candles
-        candles = None
-        if isinstance(data_raw, dict):
-            attrs = data_raw.get("attributes") or {}
-            candles = attrs.get("candles") or attrs.get("ohlcv_list") or attrs.get("ohlcv")
-        elif isinstance(data_raw, list):
-            candles = data_raw
-        if candles is None:
-            candles = data_raw.get("ohlcv") or data_raw.get("ohlcv_list") or data_raw.get("candles") or []
         
         if not candles or len(candles) < 2:
             # CMC failed, try fallback

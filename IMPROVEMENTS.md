@@ -26,16 +26,22 @@ python3 -m wakebot.main --health
 - 429 error counting
 - Penalty time accumulation (Retry-After sleep)
 - Effective RPS reporting
+- **✅ NEW**: Limiter health snapshots with `snapshot()` method
+- **✅ NEW**: Per-limiter health logging with `log_ratelimit_health()`
 
 ### New Metrics
 - `http.get_cycle_requests()` - total HTTP requests in cycle
 - `http.get_cycle_429()` - number of 429 errors
 - `http.get_cycle_penalty()` - total penalty seconds
 - `http.get_effective_rps()` - current rate limiter RPS
+- **✅ NEW**: `limiter.snapshot()` - returns dict with `effective_rps`, `tokens`, `p429_pct`, `concurrency`
+- **✅ NEW**: `http.log_ratelimit_health(prefix)` - logs limiter state snapshot
 
 ### Output Example
 ```
 [rate] req=15 429=0 penalty=0.50s rps≈0.47
+[rl:cmc] rps=0.467 tokens=0.85 p429%=2.3 conc=8
+[rl:gt] rps=0.450 tokens=1.20 p429%=0.0 conc=6
 ```
 
 ## C) Response Validation
@@ -46,9 +52,11 @@ python3 -m wakebot.main --health
 - Skips invalid pages with warning log
 
 ### OHLCV Validation
-- `_validate_cmc_ohlcv_doc()` in `cmc.py`
-- Validates candle format: [ts, o, h, l, c, v]
-- Falls back to GT if validation fails (when enabled)
+- **✅ ENHANCED**: `_validate_cmc_ohlcv_doc()` in `cmc.py` now uses strict validation
+- Raises `ValueError` with detailed error messages on validation failure
+- Validates response structure: `{"data": {"attributes": {"candles": [...]}}}`
+- Validates each candle: must be list/tuple with ≥6 numeric elements `[ts,o,h,l,c,v]`
+- Falls back to GT if validation fails (when `allow_gt_ohlcv_fallback=true`)
 
 ### Log Format
 ```
@@ -133,12 +141,13 @@ export CMC_RETRY_AFTER_CAP_S=3.0
 ## File Changes
 
 ### Modified Files
-1. `wakebot/net_http.py` - Rate-limit counters and metrics
-2. `wakebot/cmc.py` - OHLCV validation and data quality logging
-3. `wakebot/discovery.py` - Discovery validation
-4. `wakebot/alerts.py` - Source tracking in alert text
-5. `wakebot/main.py` - Health check, metrics output, health summary
-6. `wakebot/config.py` - Chain slug mapping, BSC defaults
+1. **✅ `wakebot/rate_limit.py`** - Added `snapshot()` method for monitoring
+2. **✅ `wakebot/net_http.py`** - Added `log_ratelimit_health()`, rate-limit counters and metrics
+3. **✅ `wakebot/cmc.py`** - Enhanced strict OHLCV validation, data quality logging, **v4 endpoint migration**
+4. **✅ `wakebot/discovery.py`** - Discovery validation, **v4 endpoint migration**
+5. `wakebot/alerts.py` - Source tracking in alert text
+6. **✅ `wakebot/main.py`** - Health check with **v4 endpoints**, metrics output, limiter health logging
+7. **✅ `wakebot/config.py`** - **v4 API base URLs**, chain slug mapping, BSC defaults
 
 ### New Features
 - Health check function with `--health` flag
@@ -149,14 +158,16 @@ export CMC_RETRY_AFTER_CAP_S=3.0
 
 ## Notes
 
-### CMC API Endpoints
-Current implementation uses:
-- Discovery: `/dexer/v3/{chain}/pools/{new|trending}`
-- OHLCV: `/dexer/v3/{chain}/pairs/{pair_id}/ohlcv/latest`
+### CMC API Endpoints (Updated to v4)
+**✅ UPDATED** to actual CMC DEX API v4 (as of 2025):
+- Discovery: `/v4/dex/spot-pairs/latest?chain_slug={chain}&category={new|trending|all}&page={page}&limit={limit}`
+- OHLCV: `/v4/dex/pairs/ohlcv/latest?chain_slug={chain}&pair_address={pool_id}&timeframe=1h&aggregate=1&limit=25`
+- Dexes list: `/v4/dex/dexes?chain_slug={chain}`
 
-**Important**: If actual CMC API paths differ (e.g., `/v4/dex/` instead of `/dexer/v3/`), update `config.py`:
+Default base URLs in `config.py`:
 ```python
-cmc_dex_base = os.getenv("CMC_DEX_BASE", "https://pro-api.coinmarketcap.com/v4/dex")
+cmc_dex_base = "https://api.coinmarketcap.com/v4/dex"
+cmc_dex_base_alt = "https://pro-api.coinmarketcap.com/v4/dex"
 ```
 
 ### Validation Benefits

@@ -379,16 +379,16 @@ def cmc_discover_by_source(
 
     if s in {"new", "trending", "pools"}:
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-            url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools/{'new' if s=='new' else 'trending' if s=='trending' else ''}"
-            if url.endswith("/"):
-                url = url[:-1]
-            url = f"{url}?page={page}&page_size={cfg.cmc_page_size}"
+            # CMC DEX v4 discovery endpoint
+            # /v4/dex/spot-pairs/latest?chain_slug={chain}&category={new|trending|all}&page={page}&limit={limit}
+            category = "new" if s == "new" else "trending" if s == "trending" else "all"
+            url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category={category}&page={page}&limit={cfg.cmc_page_size}"
             items = _fetch_page(url, page)
             if items:
                 out.extend(items)
     elif s == "dexes":
-        # list dexes
-        dexes_url = f"{cfg.cmc_dex_base}/{cmc_chain}/dexes"
+        # CMC DEX v4: list dexes for chain
+        dexes_url = f"{cfg.cmc_dex_base}/dexes?chain_slug={cmc_chain}"
         try:
             doc = http.cmc_get_json(dexes_url, timeout=20.0) or {}
             dex_items = doc.get("data") or doc.get("result") or []
@@ -401,14 +401,14 @@ def cmc_discover_by_source(
                 dex_ids.append(_id)
         for dex_id in dex_ids:
             for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-                url = f"{cfg.cmc_dex_base}/{cmc_chain}/dexes/{dex_id}/pools?page={page}&page_size={cfg.cmc_page_size}"
+                url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&dex_id={dex_id}&page={page}&limit={cfg.cmc_page_size}"
                 items = _fetch_page(url, page)
                 if items:
                     out.extend(items)
     else:
-        # treat as pools
+        # treat as general pools (all category)
         for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-            url = f"{cfg.cmc_dex_base}/{cmc_chain}/pools?page={page}&page_size={cfg.cmc_page_size}"
+            url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=all&page={page}&limit={cfg.cmc_page_size}"
             items = _fetch_page(url, page)
             if items:
                 out.extend(items)
