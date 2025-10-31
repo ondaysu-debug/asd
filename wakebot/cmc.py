@@ -102,24 +102,25 @@ def fetch_cmc_ohlcv_25h(
     cfg: Config,
     http: HttpClient,
     chain: str,
-    pool_id: str,
+    pair_address: str,
     cache,  # GeckoCache instance for fallback
     pool_created_at: str | None = None,
 ) -> tuple[float, float, bool, str]:
     """
-    Fetch 25 hourly candles from CMC DEX API and return (vol1h, prev24h, ok_age, source).
+    Fetch 25 hourly candles from CMC DEX API v4 and return (vol1h, prev24h, ok_age, source).
+    
+    v4 OHLCV: /pairs/ohlcv/latest
+      - network_slug=<slug>
+      - contract_address=<pair_address>
+      - interval=1h
+      - limit=25
     
     ok_age = True if pool age > cfg.revival_min_age_days
     source = "CMC DEX" or "CMC→GT fallback" or "GeckoTerminal OHLCV"
     
-    CMC DEX endpoint (actual as of 2025): 
-    GET {cmc_dex_base}/{chain}/pairs/{pool_id}/ohlcv/latest
-    Params: timeframe=1h, aggregate=1, limit=25
-    
-    NOTE: If CMC API path differs, adjust endpoint construction below.
     Fallback to GeckoTerminal if allow_gt_ohlcv_fallback=True and CMC fails.
     """
-    key = (f"cmc25:{chain}", pool_id)
+    key = (f"cmc25:{chain}", pair_address)
     cached = _get_cached_cmc_ohlcv(key, int(cfg.gecko_ttl_sec))
     if cached is not None:
         # Cached value includes source tag
@@ -128,34 +129,42 @@ def fetch_cmc_ohlcv_25h(
 
     cmc_chain = _normalize_cmc_chain(cfg, chain)
     
-    # CMC DEX OHLCV endpoint v4 (actual as of 2025)
-    # Format: /v4/dex/pairs/ohlcv/latest
-    # Params: chain_slug={chain}, pair_address={pool_id}, timeframe=1h, aggregate=1, limit=25
-    url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?chain_slug={cmc_chain}&pair_address={pool_id}&timeframe=1h&aggregate=1&limit=25"
+    # CMC DEX OHLCV endpoint v4
+    url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?network_slug={cmc_chain}&contract_address={pair_address}&interval=1h&limit=25"
     
     try:
         doc = http.cmc_get_json(url, timeout=20.0) or {}
         
-        # Strict validation: will raise ValueError on failure
+        # Строгая валидация структуры v4
         try:
-            candles = _validate_cmc_ohlcv_doc(doc, pool_id)
+            data = doc.get("data")
+            if not isinstance(data, dict):
+                raise ValueError("CMC OHLCV: data not dict")
+            attrs = data.get("attributes") or {}
+            candles = attrs.get("candles") or data.get("candles")
+            if not isinstance(candles, list) or len(candles) < 2:
+                raise ValueError("CMC OHLCV: candles missing/short")
+            
+            # Validate each candle format: [ts, o, h, l, c, v]
+            parsed = []
+            for i, c in enumerate(candles):
+                if not isinstance(c, (list, tuple)) or len(c) < 6:
+                    raise ValueError(f"CMC OHLCV: candle[{i}] invalid")
+                try:
+                    ts = int(c[0]); o = float(c[1]); h = float(c[2]); l = float(c[3]); cl = float(c[4]); v = float(c[5])
+                except (TypeError, ValueError) as e:
+                    raise ValueError(f"CMC OHLCV: candle[{i}] cannot convert: {e}")
+                parsed.append((ts,o,h,l,cl,v))
+            
+            candles = parsed
         except ValueError as ve:
-            print(f"[cmc][validate] {ve} for pair={pool_id}; fallback? {cfg.allow_gt_ohlcv_fallback}")
+            print(f"[cmc][validate] {ve} for pair={pair_address}; fallback? {cfg.allow_gt_ohlcv_fallback}")
             if cfg.allow_gt_ohlcv_fallback:
-                return _fallback_gt_ohlcv_25h(cfg, http, chain, pool_id, cache, pool_created_at)
+                return _fallback_gt_ohlcv_25h(cfg, http, chain, pair_address, cache, pool_created_at)
             val = (0.0, 0.0, False, "CMC DEX")
             _set_cached_cmc_ohlcv(key, val)
             return val
         
-        if not candles or len(candles) < 2:
-            # CMC failed, try fallback
-            if cfg.allow_gt_ohlcv_fallback:
-                print(f"[cmc→gt] {chain}/{pool_id}: CMC empty, fallback to GT")
-                return _fallback_gt_ohlcv_25h(cfg, http, chain, pool_id, cache, pool_created_at)
-            val = (0.0, 0.0, False, "CMC DEX")
-            _set_cached_cmc_ohlcv(key, val)
-            return val
-
         # Parse candles: format [ts, o, h, l, c, v]
         # vol1h = last candle volume
         try:
@@ -166,7 +175,7 @@ def fetch_cmc_ohlcv_25h(
         # prev24h = sum of volumes from candles[-25:-1]
         try:
             prev_window = candles[-25:-1] if len(candles) >= 25 else candles[:-1]
-            prev24h = sum(float(c[5]) for c in prev_window if len(c) >= 6)
+            prev24h = sum(float(c[5]) for c in prev_window)
         except (IndexError, TypeError, ValueError):
             prev24h = 0.0
 
@@ -192,11 +201,11 @@ def fetch_cmc_ohlcv_25h(
         return val
 
     except Exception as e:
-        print(f"[cmc] {chain}/{pool_id} OHLCV error: {type(e).__name__}: {e}")
+        print(f"[cmc] {chain}/{pair_address} OHLCV error: {type(e).__name__}: {e}")
         # Try fallback to GeckoTerminal
         if cfg.allow_gt_ohlcv_fallback:
-            print(f"[cmc→gt] {chain}/{pool_id}: CMC exception, fallback to GT")
-            return _fallback_gt_ohlcv_25h(cfg, http, chain, pool_id, cache, pool_created_at)
+            print(f"[cmc→gt] {chain}/{pair_address}: CMC exception, fallback to GT")
+            return _fallback_gt_ohlcv_25h(cfg, http, chain, pair_address, cache, pool_created_at)
         val = (0.0, 0.0, False, "CMC DEX")
         _set_cached_cmc_ohlcv(key, val)
         return val
@@ -206,7 +215,7 @@ def _fallback_gt_ohlcv_25h(
     cfg: Config,
     http: HttpClient,
     chain: str,
-    pool_id: str,
+    pair_address: str,
     cache,
     pool_created_at: str | None,
     cmc_vol1h: float = 0.0,
@@ -222,15 +231,15 @@ def _fallback_gt_ohlcv_25h(
     from .gecko import fetch_gt_ohlcv_25h_with_age
     
     try:
-        vol1h_gt, prev24h_gt, ok_age = fetch_gt_ohlcv_25h_with_age(cfg, http, chain, pool_id, cache, pool_created_at)
+        vol1h_gt, prev24h_gt, ok_age = fetch_gt_ohlcv_25h_with_age(cfg, http, chain, pair_address, cache, pool_created_at)
         
         # Data quality logging if we have CMC data to compare
         if cmc_vol1h > 0 or cmc_prev24h > 0:
-            _log_data_quality(cfg, chain, pool_id, cmc_vol1h, vol1h_gt, cmc_prev24h, prev24h_gt)
+            _log_data_quality(cfg, chain, pair_address, cmc_vol1h, vol1h_gt, cmc_prev24h, prev24h_gt)
         
         return (vol1h_gt, prev24h_gt, ok_age, "CMC→GT fallback")
     except Exception as e:
-        print(f"[gt] {chain}/{pool_id} fallback error: {type(e).__name__}: {e}")
+        print(f"[gt] {chain}/{pair_address} fallback error: {type(e).__name__}: {e}")
         return (0.0, 0.0, False, "GeckoTerminal OHLCV")
 
 
@@ -244,23 +253,13 @@ def _log_data_quality(
     prev24h_gt: float,
 ) -> None:
     """Log data quality comparison between CMC and GT"""
-    try:
-        threshold = float(cfg.dq_discrepancy_threshold)
-        # Calculate absolute and relative differences
-        dv1 = abs(vol1h_cmc - vol1h_gt)
-        dv1_rel = dv1 / max(1.0, vol1h_cmc) if vol1h_cmc > 0 else 0.0
-        
-        dprev = abs(prev24h_cmc - prev24h_gt)
-        dprev_rel = dprev / max(1.0, prev24h_cmc) if prev24h_cmc > 0 else 0.0
-        
-        # Log comparison
-        print(
-            f"[dq] {chain}/{pool_id} v1h CMC={vol1h_cmc:.2f} GT={vol1h_gt:.2f} Δ={dv1:.2f} ({dv1_rel:.1%}); "
-            f"prev24 CMC={prev24h_cmc:.2f} GT={prev24h_gt:.2f} Δ={dprev:.2f} ({dprev_rel:.1%})"
-        )
-        
-        # Warning if discrepancy exceeds threshold
-        if dv1_rel > threshold or dprev_rel > threshold:
-            print(f"[dq][warn] ⚠️  discrepancy >{int(threshold*100)}% for {chain}/{pool_id}")
-    except Exception as e:
-        print(f"[dq] error logging quality for {chain}/{pool_id}: {e}")
+    def pct(a, b):
+        return 0.0 if b == 0 else abs(a - b) / abs(b)
+    p1 = pct(vol1h_cmc, vol1h_gt)
+    p2 = pct(prev24h_cmc, prev24h_gt)
+    print(
+        f"[dq] {chain}/{pool_id} v1h CMC={vol1h_cmc:.2f} GT={vol1h_gt:.2f} Δ={abs(vol1h_cmc-vol1h_gt):.2f} ({p1*100:.1f}%) "
+        f"; prev24 CMC={prev24h_cmc:.2f} GT={prev24h_gt:.2f} Δ={abs(prev24h_cmc-prev24h_gt):.2f} ({p2*100:.1f}%)"
+    )
+    if max(p1, p2) > float(cfg.dq_discrepancy_threshold):
+        print(f"[dq][warn] discrepancy >{cfg.dq_discrepancy_threshold*100:.0f}% for {chain}/{pool_id}")

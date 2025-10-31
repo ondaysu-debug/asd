@@ -81,8 +81,8 @@ def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
         chain = (cfg.chains or ["ethereum"])[0]
         cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
         
-        # Light discovery call (1 page, limit=5) - CMC DEX v4 with mandatory category=all
-        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=all&page=1&limit=5"
+        # Light discovery call (1 page, limit=5) - CMC DEX v4 with network_slug
+        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?network_slug={cmc_chain}&limit=5"
         try:
             doc = http.cmc_get_json(discovery_url, timeout=10.0) or {}
             ok = ok and bool(doc.get("data"))
@@ -109,7 +109,7 @@ def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
             pass
         
         if pair_id:
-            ohlcv_url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?chain_slug={cmc_chain}&pair_address={pair_id}&timeframe=1h&aggregate=1&limit=2"
+            ohlcv_url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?network_slug={cmc_chain}&contract_address={pair_id}&interval=1h&limit=2"
             try:
                 ohlcv = http.cmc_get_json(ohlcv_url, timeout=10.0) or {}
                 ok = ok and bool(ohlcv.get("data"))
@@ -306,7 +306,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
     http.update_effective_rps()
     print(
         f"[rate] req={http.get_cycle_requests()} 429={http.get_cycle_429()} "
-        f"penalty={http.get_cycle_penalty():.2f}s rps≈{http.get_effective_rps():.2f}"
+        f"penalty={http.get_cycle_penalty():.2f}s rps?{http.get_effective_rps():.2f}"
     )
     
     # Rate limiter health monitoring
@@ -360,10 +360,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.health_online:
         http = HttpClient(cfg)
         print("[health] Running online health check (CMC API ping)...")
-        # Debug: show final discovery URL with category parameter
+        # Debug: show final discovery URL with network_slug
         chain = (cfg.chains or ["ethereum"])[0]
         cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
-        debug_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?chain_slug={cmc_chain}&category=all&page=1&limit=5"
+        debug_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?network_slug={cmc_chain}&limit=5"
         print(f"[health] debug discovery URL: {debug_url}")
         ok = health_check_online(cfg, http, logger=print)
         print(f"[health] Result: {'PASS' if ok else 'FAIL'}")
