@@ -133,8 +133,25 @@ def fetch_cmc_ohlcv_25h(
     # CMC DEX OHLCV endpoint v4
     url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?network_slug={cmc_chain}&contract_address={pair_address}&interval=1h&limit=25"
     
+    # Debug logging
+    # print(f"[cmc][ohlcv] Fetching: {chain}/{cmc_chain}/{pair_address}")
+    
     try:
         doc = http.cmc_get_json(url, timeout=20.0) or {}
+        
+        # Check for API errors first
+        status = doc.get("status", {})
+        if isinstance(status, dict):
+            error_code = status.get("error_code")
+            if error_code and error_code != 0:
+                error_msg = status.get("error_message", "Unknown OHLCV error")
+                print(f"[cmc][ohlcv] API Error {error_code} for {chain}/{pair_address}: {error_msg}")
+                if cfg.allow_gt_ohlcv_fallback:
+                    print(f"[cmc→gt] {chain}/{pair_address}: API error, fallback to GT")
+                    return _fallback_gt_ohlcv_25h(cfg, http, chain, pair_address, cache, pool_created_at)
+                val = (0.0, 0.0, False, "CMC DEX")
+                _set_cached_cmc_ohlcv(key, val)
+                return val
         
         # Строгая валидация структуры v4
         try:

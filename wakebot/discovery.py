@@ -10,13 +10,39 @@ from .net_http import HttpClient
 
 def _validate_cmc_pairs_doc(doc: dict) -> list:
     """
-    Validate CMC discovery response structure (v4).
-    Expected: {"data": [...], "status": {"scroll_id": "..."}}
+    Enhanced validation for CMC discovery response structure (v4).
+    Expected: {"data": [...], "status": {"scroll_id": "...", "error_code": 0}}
     Returns the data list or empty list if invalid.
     """
-    # ? v4 ??????? {"data": [ ... ], "status": {"scroll_id": "..."}}
+    if not isinstance(doc, dict):
+        print(f"[cmc][validate] Response is not a dict: {type(doc)}")
+        return []
+    
+    # Check for API errors in status
+    status = doc.get("status", {})
+    if isinstance(status, dict):
+        error_code = status.get("error_code")
+        if error_code and error_code != 0:
+            error_msg = status.get("error_message", "Unknown API error")
+            print(f"[cmc][validate] API Error {error_code}: {error_msg}")
+            return []
+    
+    # Extract data - try multiple paths for flexibility
     data = doc.get("data")
-    return data if isinstance(data, list) else []
+    
+    if isinstance(data, list):
+        return data
+    elif isinstance(data, dict):
+        # Try alternative nested structures
+        items = data.get("items") or data.get("pairs") or data.get("list") or []
+        if items:
+            print(f"[cmc][validate] Found data in nested structure: {len(items)} items")
+            return items if isinstance(items, list) else []
+        print(f"[cmc][validate] Data is dict but no items found, keys: {list(data.keys())}")
+        return []
+    else:
+        print(f"[cmc][validate] Unexpected data type: {type(data)}")
+        return []
 
 
 def _source_to_endpoint(source: str) -> str:
@@ -318,6 +344,9 @@ def cmc_discover_by_source(
     out: list[dict] = []
     scanned_pairs = 0
     pages_done = 0
+    
+    # Debug logging for network_slug
+    print(f"[discover][{chain}] Using network_slug: {cmc_chain}")
 
     # Map source to category parameter for CMC DEX v4
     # source "new" -> category=new
@@ -337,11 +366,22 @@ def cmc_discover_by_source(
         """
         nonlocal scanned_pairs, pages_done
         try:
+            # Debug: log the full URL being requested
+            print(f"[discover][{chain}] Fetching: {url[:120]}...")
             doc = http.cmc_get_json(url, timeout=20.0) or {}
+            
+            # Debug: log response structure
+            if doc:
+                print(f"[discover][{chain}] Response keys: {list(doc.keys())}")
+            
             # Validate response structure (v4)
             data = _validate_cmc_pairs_doc(doc)
             if not data:
-                print(f"[cmc][validate] unexpected discovery schema; skipping {chain}/new page {pages_done+1}")
+                print(f"[cmc][validate] No valid data for {chain}/{s} page {pages_done+1}")
+                # Log full response for debugging if it's an error
+                status = doc.get("status", {})
+                if status.get("error_code"):
+                    print(f"[cmc][validate] Full error response: {doc}")
                 return [], None
             
             # Extract scroll_id for pagination
