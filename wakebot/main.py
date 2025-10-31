@@ -72,56 +72,103 @@ def health_check(cfg: Config, logger=print) -> bool:
 
 def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
     """
-    Online health check: mini-ping to CMC API (1 discovery page + 1 OHLCV).
-    Returns True/False and prints brief report.
+    Enhanced online health check: tests each configured chain's network_slug.
+    Returns True/False and prints detailed report per chain.
     """
     ok = True
+    working_chains = []
+    failed_chains = []
+    
     try:
-        # 1) Discovery ping: one page for one chain
-        chain = (cfg.chains or ["ethereum"])[0]
-        cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
-        
-        # Light discovery call (1 page, limit=5) - CMC DEX v4 with network_slug
-        discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?network_slug={cmc_chain}&limit=5"
-        try:
-            doc = http.cmc_get_json(discovery_url, timeout=10.0) or {}
-            ok = ok and bool(doc.get("data"))
-            logger(f"[health] discovery on {chain}/{cmc_chain}: {'OK' if doc.get('data') else 'FAIL'}")
-        except Exception as e:
-            logger(f"[health] discovery on {chain}/{cmc_chain}: FAIL ({e})")
-            ok = False
-        
-        # 2) OHLCV ping (if we got at least 1 pair_id from discovery)
-        pair_id = None
-        try:
-            data = (doc or {}).get("data") or []
-            if data:
-                # Pick first valid pair/pool id
-                first = data[0] if isinstance(data, list) else {}
-                pair_id = (
-                    first.get("pair_address")
-                    or first.get("id")
-                    or first.get("pairId")
-                    or first.get("pool_id")
-                    or first.get("address")
-                )
-        except Exception:
-            pass
-        
-        if pair_id:
-            ohlcv_url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?network_slug={cmc_chain}&contract_address={pair_id}&interval=1h&limit=2"
+        # Test each configured chain
+        for chain in cfg.chains:
+            cmc_chain = cfg.chain_slugs.get(chain, chain) if cfg.chain_slugs else chain
+            logger(f"[health] Testing chain: {chain} -> network_slug: {cmc_chain}")
+            
+            # Light discovery call (1 page, limit=5) - CMC DEX v4 with network_slug
+            discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?network_slug={cmc_chain}&limit=5"
             try:
-                ohlcv = http.cmc_get_json(ohlcv_url, timeout=10.0) or {}
-                ok = ok and bool(ohlcv.get("data"))
-                logger(f"[health] ohlcv for {pair_id}: {'OK' if ohlcv.get('data') else 'FAIL'}")
+                doc = http.cmc_get_json(discovery_url, timeout=10.0) or {}
+                
+                # Check for API errors
+                status = doc.get("status", {})
+                error_code = status.get("error_code") if isinstance(status, dict) else None
+                
+                if error_code and error_code != 0:
+                    error_msg = status.get("error_message", "Unknown error")
+                    logger(f"[health] ? {chain}: API Error {error_code} - {error_msg}")
+                    failed_chains.append((chain, error_msg))
+                    ok = False
+                else:
+                    data = doc.get("data")
+                    if data and isinstance(data, list) and len(data) > 0:
+                        logger(f"[health] ? {chain}: OK - {len(data)} items")
+                        working_chains.append(chain)
+                    else:
+                        logger(f"[health] ??  {chain}: No data returned (empty list)")
+                        failed_chains.append((chain, "No data"))
+                        ok = False
             except Exception as e:
-                logger(f"[health] ohlcv for {pair_id}: FAIL ({e})")
+                logger(f"[health] ? {chain}: Exception - {type(e).__name__}: {e}")
+                failed_chains.append((chain, str(e)))
                 ok = False
+        
+        # Summary
+        logger(f"\n[health] Summary: {len(working_chains)}/{len(cfg.chains)} chains working")
+        if working_chains:
+            logger(f"[health] Working: {', '.join(working_chains)}")
+        if failed_chains:
+            logger(f"[health] Failed: {', '.join([f'{ch} ({err})' for ch, err in failed_chains])}")
+        
+        # 2) OHLCV ping (if we have at least one working chain)
+        if working_chains:
+            test_chain = working_chains[0]
+            cmc_chain = cfg.chain_slugs.get(test_chain, test_chain) if cfg.chain_slugs else test_chain
+            discovery_url = f"{cfg.cmc_dex_base}/spot-pairs/latest?network_slug={cmc_chain}&limit=5"
+            
+            pair_id = None
+            try:
+                doc = http.cmc_get_json(discovery_url, timeout=10.0) or {}
+                data = doc.get("data") or []
+                if data and isinstance(data, list):
+                    # Pick first valid pair/pool id
+                    first = data[0]
+                    pair_id = (
+                        first.get("pair_address")
+                        or first.get("id")
+                        or first.get("pairId")
+                        or first.get("pool_id")
+                        or first.get("address")
+                    )
+            except Exception:
+                pass
+            
+            if pair_id:
+                ohlcv_url = f"{cfg.cmc_dex_base}/pairs/ohlcv/latest?network_slug={cmc_chain}&contract_address={pair_id}&interval=1h&limit=2"
+                try:
+                    ohlcv = http.cmc_get_json(ohlcv_url, timeout=10.0) or {}
+                    status = ohlcv.get("status", {})
+                    error_code = status.get("error_code") if isinstance(status, dict) else None
+                    
+                    if error_code and error_code != 0:
+                        error_msg = status.get("error_message", "Unknown error")
+                        logger(f"[health] ? OHLCV for {test_chain}/{pair_id}: API Error {error_code} - {error_msg}")
+                        ok = False
+                    elif ohlcv.get("data"):
+                        logger(f"[health] ? OHLCV for {test_chain}/{pair_id}: OK")
+                    else:
+                        logger(f"[health] ??  OHLCV for {test_chain}/{pair_id}: No data")
+                        ok = False
+                except Exception as e:
+                    logger(f"[health] ? OHLCV for {test_chain}/{pair_id}: Exception - {e}")
+                    ok = False
+            else:
+                logger("[health] ??  Skip OHLCV: no pair_id from discovery")
         else:
-            logger("[health] skip ohlcv: no pair_id from discovery")
+            logger("[health] ??  Skip OHLCV: no working chains")
     
     except Exception as e:
-        logger(f"[health] error: {type(e).__name__}: {e}")
+        logger(f"[health] ? Unhandled error: {type(e).__name__}: {e}")
         ok = False
     
     return ok

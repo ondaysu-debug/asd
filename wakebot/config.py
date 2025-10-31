@@ -247,12 +247,17 @@ class Config:
         cfg.gecko_sources_list = [s.strip() for s in (cfg.gecko_sources or "").split(",") if s.strip()]
         cfg.cmc_sources_list = [s.strip() for s in (cfg.cmc_sources or "").split(",") if s.strip()]
         
-        # CMC network_slug mapping (?????: BSC = bnb-chain)
+        # CMC network_slug mapping (v4 API)
+        # Based on CMC DEX API documentation and testing
         cfg.chain_slugs = {
             "ethereum": "ethereum",
-            "bsc": "bnb-chain",
-            # "base": "base",     # ????????, ????? ?????????? ?????????
-            # "solana": "solana",
+            "bsc": "bsc",  # Fixed: changed from "bnb-chain" to "bsc"
+            "base": "base",
+            "solana": "solana",
+            "polygon": "polygon",
+            "arbitrum": "arbitrum",
+            "optimism": "optimism",
+            "avalanche": "avalanche",
         }
 
         # Attach revival config
