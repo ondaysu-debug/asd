@@ -14,6 +14,7 @@ def _validate_cmc_pairs_doc(doc: dict) -> list:
     Expected: {"data": [...], "status": {"scroll_id": "..."}}
     Returns the data list or empty list if invalid.
     """
+    # ? v4 ??????? {"data": [ ... ], "status": {"scroll_id": "..."}}
     data = doc.get("data")
     return data if isinstance(data, list) else []
 

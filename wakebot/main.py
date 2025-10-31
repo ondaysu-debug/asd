@@ -146,7 +146,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
     cycle_ok = True
     first_error = None
 
-    # Reset per-cycle metrics for HTTP requests/429/penalty
+    # ??????? ???????? ????? ????? ???????
     http.reset_cycle_metrics()
 
     # discovery across chains using configured CMC sources and progress cursors
@@ -309,7 +309,7 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
         f"penalty={http.get_cycle_penalty():.2f}s rps?{http.get_effective_rps():.2f}"
     )
     
-    # Rate limiter health monitoring
+    # ???? ???????? ?????????
     http.log_ratelimit_health("cmc")
     if cfg.allow_gt_ohlcv_fallback:
         http.log_ratelimit_health("gt")
