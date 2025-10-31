@@ -8,27 +8,14 @@ from .gecko import _normalize_gt_chain
 from .net_http import HttpClient
 
 
-def _validate_cmc_pairs_doc(doc: dict) -> bool:
+def _validate_cmc_pairs_doc(doc: dict) -> list:
     """
-    Validate CMC discovery response structure.
-    Expected: {"data": [...]} where each item has pair identifiers and token info.
+    Validate CMC discovery response structure (v4).
+    Expected: {"data": [...], "status": {"scroll_id": "..."}}
+    Returns the data list or empty list if invalid.
     """
-    if not isinstance(doc, dict):
-        return False
-    data = doc.get("data") or doc.get("result") or doc.get("items")
-    if not isinstance(data, list):
-        return False
-    
-    # Each element should have at least one identifier for the pair
-    for item in data:
-        if not isinstance(item, dict):
-            return False
-        # Check for any common pair ID fields
-        has_id = any(k in item for k in ("pair_address", "id", "pairId", "pool_id", "address", "poolAddress"))
-        if not has_id:
-            return False
-    
-    return True
+    data = doc.get("data")
+    return data if isinstance(data, list) else []
 
 
 def _source_to_endpoint(source: str) -> str:
@@ -342,20 +329,25 @@ def cmc_discover_by_source(
     else:
         category = "all"
 
-    def _fetch_page(url: str, page_num: int) -> list[dict]:
+    def _fetch_page(url: str, page_num: int) -> tuple[list[dict], str | None]:
         """
         Fetch single page from CMC DEX v4 API.
+        Returns (items, scroll_id) tuple.
         """
         nonlocal scanned_pairs, pages_done
         try:
             doc = http.cmc_get_json(url, timeout=20.0) or {}
-            # Validate response structure
-            if not _validate_cmc_pairs_doc(doc):
-                print(f"[cmc][validate] unexpected discovery schema; skipping {chain}/{s} page {page_num}")
-                return []
+            # Validate response structure (v4)
+            data = _validate_cmc_pairs_doc(doc)
+            if not data:
+                print(f"[cmc][validate] unexpected discovery schema; skipping {chain}/new page {pages_done+1}")
+                return [], None
+            
+            # Extract scroll_id for pagination
+            status = doc.get("status") or {}
+            scroll_id = status.get("scroll_id")
             
             # Success - process data
-            data = doc.get("data") or doc.get("result") or doc.get("items") or []
             items: list[dict] = []
             seen: set[str] = set()
             for pool in data:
@@ -399,26 +391,33 @@ def cmc_discover_by_source(
                     }
                 )
             pages_done += 1
-            return items
+            return items, scroll_id
             
         except Exception as e:
             print(f"[{chain}] CMC {s} page {page_num} error: {e}")
             pages_done += 1
-            return []
+            return [], None
 
     if s in {"new", "trending", "pools", "all"}:
-        # CMC DEX v4: spot-pairs/latest with mandatory category parameter
-        for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-            url = (
-                f"{cfg.cmc_dex_base}/spot-pairs/latest"
-                f"?chain_slug={cmc_chain}&category={category}&page={page}&limit={cfg.cmc_page_size}"
-            )
-            items = _fetch_page(url, page)
-            if items:
-                out.extend(items)
+        # CMC DEX v4: spot-pairs/latest with network_slug (????????? ????? scroll_id, ? ?? ????? page/category)
+        base_url = (
+            f"{cfg.cmc_dex_base}/spot-pairs/latest"
+            f"?network_slug={cmc_chain}&limit={cfg.cmc_page_size}"
+        )
+        scroll_id = None
+        pages_planned = max(1, page_limit)
+        pages_iterated = 0
+        while pages_iterated < pages_planned:
+            url = base_url if not scroll_id else f"{base_url}&scroll_id={scroll_id}"
+            items_page, scroll_id = _fetch_page(url, pages_iterated + 1)
+            if items_page:
+                out.extend(items_page)
+            if not scroll_id:
+                break
+            pages_iterated += 1
     elif s == "dexes":
         # CMC DEX v4: list dexes for chain, then fetch pairs per dex
-        dexes_url = f"{cfg.cmc_dex_base}/dexes?chain_slug={cmc_chain}"
+        dexes_url = f"{cfg.cmc_dex_base}/dexes?network_slug={cmc_chain}"
         dex_ids: list[str] = []
         try:
             doc = http.cmc_get_json(dexes_url, timeout=20.0) or {}
@@ -431,26 +430,40 @@ def cmc_discover_by_source(
         except Exception as e:
             print(f"[{chain}] CMC dexes list error: {e}")
         
-        # Fetch pairs per dex with category parameter
+        # Fetch pairs per dex (v4 uses network_slug and scroll_id)
         for dex_id in dex_ids:
-            for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-                url = (
-                    f"{cfg.cmc_dex_base}/spot-pairs/latest"
-                    f"?chain_slug={cmc_chain}&dex_id={dex_id}&category={category}&page={page}&limit={cfg.cmc_page_size}"
-                )
-                items = _fetch_page(url, page)
-                if items:
-                    out.extend(items)
-    else:
-        # Unknown source - treat as general pools with category=all
-        for page in range(start_page, max(start_page, 1) + max(0, page_limit)):
-            url = (
+            base_url = (
                 f"{cfg.cmc_dex_base}/spot-pairs/latest"
-                f"?chain_slug={cmc_chain}&category={category}&page={page}&limit={cfg.cmc_page_size}"
+                f"?network_slug={cmc_chain}&limit={cfg.cmc_page_size}"
             )
-            items = _fetch_page(url, page)
-            if items:
-                out.extend(items)
+            scroll_id = None
+            pages_planned = max(1, page_limit)
+            pages_iterated = 0
+            while pages_iterated < pages_planned:
+                url = base_url if not scroll_id else f"{base_url}&scroll_id={scroll_id}"
+                items_page, scroll_id = _fetch_page(url, pages_iterated + 1)
+                if items_page:
+                    out.extend(items_page)
+                if not scroll_id:
+                    break
+                pages_iterated += 1
+    else:
+        # Unknown source - treat as general pools (v4 uses network_slug and scroll_id)
+        base_url = (
+            f"{cfg.cmc_dex_base}/spot-pairs/latest"
+            f"?network_slug={cmc_chain}&limit={cfg.cmc_page_size}"
+        )
+        scroll_id = None
+        pages_planned = max(1, page_limit)
+        pages_iterated = 0
+        while pages_iterated < pages_planned:
+            url = base_url if not scroll_id else f"{base_url}&scroll_id={scroll_id}"
+            items_page, scroll_id = _fetch_page(url, pages_iterated + 1)
+            if items_page:
+                out.extend(items_page)
+            if not scroll_id:
+                break
+            pages_iterated += 1
 
     # de-duplicate by pool id
     dedup: Dict[str, dict] = {}
