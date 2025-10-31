@@ -84,7 +84,7 @@ class HttpClient:
         # preserve current effective RPS
     
     def reset_cycle_metrics(self) -> None:
-        """Alias for reset_cycle_counters() - reset per-cycle req/429/penalty metrics"""
+        """Alias ??? ?????? per-cycle ?????? (req/429/penalty)"""
         self.reset_cycle_counters()
 
     def get_cycle_requests(self) -> int:
@@ -182,7 +182,7 @@ class HttpClient:
             time.sleep(min(sleep_for, 5.0))
         try:
             session = self._session()
-            # Always ensure API key header is present
+            # ???? ?????????? ??? ???? CMC ???????
             session.headers["X-CMC_PRO_API_KEY"] = self._cfg.cmc_api_key or ""
             
             r = session.get(url, timeout=timeout)
@@ -228,7 +228,7 @@ class HttpClient:
     
     # ----- Rate limiter health monitoring -----
     def log_ratelimit_health(self, prefix: str = "cmc") -> None:
-        """Log rate limiter health snapshot"""
+        """?????? ???????? ????????? ???????? (??? ????? ????????)"""
         limiter = self._cmc_limiter if prefix.lower() == "cmc" else self._limiter
         snap = limiter.snapshot()
         self._log(

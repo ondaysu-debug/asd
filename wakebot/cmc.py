@@ -119,6 +119,7 @@ def fetch_cmc_ohlcv_25h(
     source = "CMC DEX" or "CMC→GT fallback" or "GeckoTerminal OHLCV"
     
     Fallback to GeckoTerminal if allow_gt_ohlcv_fallback=True and CMC fails.
+    Строгая валидация структуры OHLCV согласно v4.
     """
     key = (f"cmc25:{chain}", pair_address)
     cached = _get_cached_cmc_ohlcv(key, int(cfg.gecko_ttl_sec))
@@ -252,7 +253,7 @@ def _log_data_quality(
     prev24h_cmc: float,
     prev24h_gt: float,
 ) -> None:
-    """Log data quality comparison between CMC and GT"""
+    """Log data quality comparison between CMC and GT (с процентами расхождения)"""
     def pct(a, b):
         return 0.0 if b == 0 else abs(a - b) / abs(b)
     p1 = pct(vol1h_cmc, vol1h_gt)
