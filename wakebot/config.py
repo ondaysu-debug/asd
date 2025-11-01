@@ -251,7 +251,7 @@ class Config:
         # Based on CMC DEX API documentation and testing
         cfg.chain_slugs = {
             "ethereum": "ethereum",
-            "bsc": "bsc",  # Fixed: changed from "bnb-chain" to "bsc"
+            "bsc": "bnb-chain",  # Fixed: CMC API requires "bnb-chain" for BSC
             "base": "base",
             "solana": "solana",
             "polygon": "polygon",
