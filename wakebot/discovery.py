@@ -415,16 +415,23 @@ def cmc_discover_by_source(
                 seen.add(pool_id)
                 scanned_pairs += 1
                 
-                # Debug logging for token pairs
-                print(f"[discover][{chain}] Processing: {base_tok.get('symbol')}/{quote_tok.get('symbol')} liq=${liquidity:.0f}")
+                # ????????? ??????????? ??????????
+                print(f"[discover][{chain}] Processing: {base_tok.get('symbol')}/{quote_tok.get('symbol')} liq=${liquidity:.0f}, tx24h={tx24h}")
                 
                 ok, token_side, native_side = is_token_native_pair(chain, base_tok, quote_tok)
                 if not ok:
+                    print(f"[discover][{chain}] \u274c Failed native pair check: {base_tok.get('symbol')}/{quote_tok.get('symbol')}")
                     continue
+                
                 if not is_base_token_acceptable(chain, token_side):
+                    print(f"[discover][{chain}] \u274c Failed base token check: {token_side.get('symbol')}")
                     continue
+                    
                 if not pool_data_filters(liquidity, cfg.liquidity_min, cfg.liquidity_max, tx24h, cfg.tx24h_max):
+                    print(f"[discover][{chain}] \u274c Failed pool filters: liq=${liquidity:.0f} (min=${cfg.liquidity_min}, max=${cfg.liquidity_max}), tx24h={tx24h} (max={cfg.tx24h_max})")
                     continue
+                
+                print(f"[discover][{chain}] \u2705 Candidate accepted: {token_side.get('symbol')}/{native_side.get('symbol')}")
                 
                 # Extract volume_24h from quote array (already extracted in _extract_common_fields)
                 quote_data = pool.get("quote") or []
