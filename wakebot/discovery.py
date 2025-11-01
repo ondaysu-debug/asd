@@ -11,37 +11,42 @@ from .net_http import HttpClient
 def _validate_cmc_pairs_doc(doc: dict) -> list:
     """
     Enhanced validation for CMC discovery response structure (v4).
-    Expected: {"data": [...], "status": {"scroll_id": "...", "error_code": 0}}
-    Returns the data list or empty list if invalid.
     """
     if not isinstance(doc, dict):
         print(f"[cmc][validate] Response is not a dict: {type(doc)}")
         return []
     
-    # Check for API errors in status
+    # Check for API errors in status - FIX: handle string "0" as success
     status = doc.get("status", {})
     if isinstance(status, dict):
         error_code = status.get("error_code")
-        if error_code and error_code != 0:
+        # Handle both string and integer error codes
+        if error_code is not None and str(error_code) != "0":
             error_msg = status.get("error_message", "Unknown API error")
             print(f"[cmc][validate] API Error {error_code}: {error_msg}")
             return []
+        else:
+            # Log success case for debugging
+            print(f"[cmc][validate] API Success: error_code={error_code}")
     
-    # Extract data - try multiple paths for flexibility
+    # Extract data
     data = doc.get("data")
     
     if isinstance(data, list):
+        # Debug: print sample of first item to understand structure
+        if data:
+            sample = data[0]
+            print(f"[cmc][validate] Sample item: {{")
+            print(f"    'name': {sample.get('name')},")
+            print(f"    'network_slug': {sample.get('network_slug')},")
+            print(f"    'base_symbol': {sample.get('base_asset_symbol')},")
+            print(f"    'quote_symbol': {sample.get('quote_asset_symbol')},")
+            print(f"    'scroll_id': {sample.get('scroll_id')},")
+            print(f"    'quote_is_list': {isinstance(sample.get('quote'), list)}")
+            print(f"}}")
         return data
-    elif isinstance(data, dict):
-        # Try alternative nested structures
-        items = data.get("items") or data.get("pairs") or data.get("list") or []
-        if items:
-            print(f"[cmc][validate] Found data in nested structure: {len(items)} items")
-            return items if isinstance(items, list) else []
-        print(f"[cmc][validate] Data is dict but no items found, keys: {list(data.keys())}")
-        return []
     else:
-        print(f"[cmc][validate] Unexpected data type: {type(data)}")
+        print(f"[cmc][validate] Data is not a list: {type(data)}")
         return []
 
 
@@ -279,55 +284,63 @@ def _cmc_pool_url_hint(pool_id: str) -> str:
     return ""
 
 
-def _extract_token(item: dict, prefix: str) -> dict:
-    tok = {}
-    # flat style
-    tok["address"] = item.get(f"{prefix}_address") or item.get(f"{prefix}Address") or ""
-    tok["symbol"] = item.get(f"{prefix}_symbol") or item.get(f"{prefix}Symbol") or ""
-    # nested style
-    nested = item.get(prefix) or item.get(f"{prefix}_token") or {}
-    if not tok["address"]:
-        tok["address"] = nested.get("address") or nested.get("contract_address") or ""
-    if not tok["symbol"]:
-        tok["symbol"] = nested.get("symbol") or nested.get("ticker") or ""
-    return tok
-
-
 def _extract_common_fields(pool: dict) -> tuple[str, dict, dict, float, int, str]:
+    """
+    Extract fields from CMC v4 response format.
+    FIX: Handle quote as list, normalize network_slug case, relax ID requirements
+    """
     # pool id
     pool_id = pool.get("id") or pool.get("pool_id") or pool.get("address") or pool.get("poolAddress") or ""
-    base_tok = _extract_token(pool, "base")
-    quote_tok = _extract_token(pool, "quote")
-    # liquidity
-    liq = (
-        pool.get("reserve_in_usd")
-        or pool.get("liquidity_in_usd")
-        or pool.get("liquidity_usd")
-        or pool.get("liquidity")
-        or 0.0
-    )
-    try:
-        liquidity = float(liq)
-    except Exception:
-        liquidity = 0.0
-    # tx24h
+    
+    # Extract base and quote tokens - FIX: relaxed ID requirements
+    base_tok = {
+        "address": pool.get("base_asset_contract_address") or "",
+        "symbol": pool.get("base_asset_symbol") or "",
+        "name": pool.get("base_asset_name") or ""
+    }
+    quote_tok = {
+        "address": pool.get("quote_asset_contract_address") or "",
+        "symbol": pool.get("quote_asset_symbol") or "",
+        "name": pool.get("quote_asset_name") or ""
+    }
+    
+    # FIX: Check if we have at least symbol or address for both tokens
+    if not (base_tok["symbol"] or base_tok["address"]) or not (quote_tok["symbol"] or quote_tok["address"]):
+        return "", {}, {}, 0.0, 0, ""
+    
+    # FIX: liquidity and volume extraction from quote array
+    liquidity = 0.0
+    volume_24h = 0.0
+    quote_data = pool.get("quote") or []
+    
+    if isinstance(quote_data, list) and quote_data:
+        # Try to find USD quote (convert_id == "2781") or use first available
+        usd_quote = None
+        for quote_item in quote_data:
+            if isinstance(quote_item, dict):
+                if quote_item.get("convert_id") == "2781":  # USD
+                    usd_quote = quote_item
+                    break
+        
+        # Use USD quote if found, otherwise first available
+        target_quote = usd_quote or quote_data[0]
+        
+        if isinstance(target_quote, dict):
+            liquidity = float(target_quote.get("liquidity") or 0.0)
+            volume_24h = float(target_quote.get("volume_24h") or 0.0)
+    
+    # FIX: tx24h - estimate from volume if not available directly
     tx24h = 0
-    tx = pool.get("transactions") or pool.get("tx") or {}
-    if isinstance(tx, dict):
-        h24 = tx.get("h24") or tx.get("24h") or {}
-        try:
-            buys = int(h24.get("buys") or h24.get("buy") or pool.get("buys24h") or 0)
-            sells = int(h24.get("sells") or h24.get("sell") or pool.get("sells24h") or 0)
-            tx24h = buys + sells
-        except Exception:
-            tx24h = int(pool.get("tx24h") or 0)
-    else:
-        try:
-            tx24h = int(pool.get("tx24h") or 0)
-        except Exception:
-            tx24h = 0
+    try:
+        # Rough estimation: assume average trade size of $1000
+        if volume_24h > 0:
+            tx24h = max(1, int(volume_24h / 1000))
+    except Exception:
+        pass
+    
     # created at
     pool_created_at = pool.get("pool_created_at") or pool.get("created_at") or pool.get("createdAt") or ""
+    
     return pool_id, base_tok, quote_tok, liquidity, tx24h, pool_created_at
 
 
@@ -362,41 +375,49 @@ def cmc_discover_by_source(
     def _fetch_page(url: str, page_num: int) -> tuple[list[dict], str | None]:
         """
         Fetch single page from CMC DEX v4 API.
-        Returns (items, scroll_id) tuple.
+        FIX: Handle scroll_id pagination, case-insensitive network_slug comparison
         """
         nonlocal scanned_pairs, pages_done
         try:
-            # Debug: log the full URL being requested
             print(f"[discover][{chain}] Fetching: {url[:120]}...")
             doc = http.cmc_get_json(url, timeout=20.0) or {}
             
-            # Debug: log response structure
-            if doc:
-                print(f"[discover][{chain}] Response keys: {list(doc.keys())}")
+            # Debug: log full status
+            status = doc.get("status", {})
+            error_code = status.get("error_code")
+            print(f"[discover][{chain}] Status: error_code={error_code}, elapsed={status.get('elapsed')}")
+            
+            # FIX: Get scroll_id from status for pagination
+            scroll_id = status.get("scroll_id")
             
             # Validate response structure (v4)
             data = _validate_cmc_pairs_doc(doc)
             if not data:
-                print(f"[cmc][validate] No valid data for {chain}/{s} page {pages_done+1}")
-                # Log full response for debugging if it's an error
-                status = doc.get("status", {})
-                if status.get("error_code"):
-                    print(f"[cmc][validate] Full error response: {doc}")
-                return [], None
-            
-            # Extract scroll_id for pagination
-            status = doc.get("status") or {}
-            scroll_id = status.get("scroll_id")
+                print(f"[cmc][validate] No valid data for {chain} page {pages_done+1}")
+                return [], scroll_id
             
             # Success - process data
             items: list[dict] = []
             seen: set[str] = set()
+            
             for pool in data:
+                # FIX: Case-insensitive network_slug comparison
+                pool_network_slug = str(pool.get("network_slug", "")).lower()
+                expected_network_slug = str(cmc_chain).lower()
+                
+                if pool_network_slug != expected_network_slug:
+                    print(f"[discover][{chain}] Skipping - network_slug mismatch: {pool_network_slug} != {expected_network_slug}")
+                    continue
+                
                 pool_id, base_tok, quote_tok, liquidity, tx24h, pool_created_at = _extract_common_fields(pool)
                 if not pool_id or pool_id in seen:
                     continue
                 seen.add(pool_id)
                 scanned_pairs += 1
+                
+                # Debug logging for token pairs
+                print(f"[discover][{chain}] Processing: {base_tok.get('symbol')}/{quote_tok.get('symbol')} liq=${liquidity:.0f}")
+                
                 ok, token_side, native_side = is_token_native_pair(chain, base_tok, quote_tok)
                 if not ok:
                     continue
@@ -405,15 +426,20 @@ def cmc_discover_by_source(
                 if not pool_data_filters(liquidity, cfg.liquidity_min, cfg.liquidity_max, tx24h, cfg.tx24h_max):
                     continue
                 
-                # Extract volume for sorting (if available)
+                # Extract volume_24h from quote array (already extracted in _extract_common_fields)
+                quote_data = pool.get("quote") or []
                 volume_24h = 0.0
-                try:
-                    volume_24h = float(pool.get("volume_24h_quote") or pool.get("volume_24h") or 0.0)
-                except Exception:
-                    pass
-                
-                # Extract listed_at for sorting (if available)
-                listed_at = pool.get("listed_at") or pool_created_at or ""
+                if isinstance(quote_data, list) and quote_data:
+                    # Try to find USD quote (convert_id == "2781") or use first available
+                    usd_quote = None
+                    for quote_item in quote_data:
+                        if isinstance(quote_item, dict):
+                            if quote_item.get("convert_id") == "2781":  # USD
+                                usd_quote = quote_item
+                                break
+                    target_quote = usd_quote or quote_data[0]
+                    if isinstance(target_quote, dict):
+                        volume_24h = float(target_quote.get("volume_24h") or 0.0)
                 
                 items.append(
                     {
@@ -428,33 +454,51 @@ def cmc_discover_by_source(
                         "tx24h": int(tx24h or 0),
                         "pool_created_at": pool_created_at or "",
                         "volume_24h": volume_24h,
-                        "listed_at": listed_at,
                     }
                 )
+            
             pages_done += 1
+            print(f"[discover][{chain}] Page {page_num}: found {len(items)} candidates")
             return items, scroll_id
             
         except Exception as e:
-            print(f"[{chain}] CMC {s} page {page_num} error: {e}")
+            print(f"[{chain}] CMC page {page_num} error: {e}")
+            import traceback
+            traceback.print_exc()
             pages_done += 1
             return [], None
 
     if s in {"new", "trending", "pools", "all"}:
-        # CMC DEX v4: spot-pairs/latest with network_slug (????????? ????? scroll_id, ? ?? ????? page/category)
+        # FIX: Use scroll_id based pagination instead of page numbers
         base_url = (
             f"{cfg.cmc_dex_base}/spot-pairs/latest"
             f"?network_slug={cmc_chain}&limit={cfg.cmc_page_size}"
         )
+        
+        # Add category if specified
+        if category != "all":
+            base_url += f"&category={category}"
+        
         scroll_id = None
-        pages_planned = max(1, page_limit)
         pages_iterated = 0
+        pages_planned = max(1, page_limit)
+        
         while pages_iterated < pages_planned:
-            url = base_url if not scroll_id else f"{base_url}&scroll_id={scroll_id}"
-            items_page, scroll_id = _fetch_page(url, pages_iterated + 1)
+            # FIX: Build URL with scroll_id for pagination
+            url = base_url
+            if scroll_id:
+                url += f"&scroll_id={scroll_id}"
+            
+            items_page, next_scroll_id = _fetch_page(url, pages_iterated + 1)
+            
             if items_page:
                 out.extend(items_page)
-            if not scroll_id:
+            
+            # FIX: Break if no more scroll_id or same scroll_id returned
+            if not next_scroll_id or next_scroll_id == scroll_id:
                 break
+                
+            scroll_id = next_scroll_id
             pages_iterated += 1
     elif s == "dexes":
         # CMC DEX v4: list dexes for chain, then fetch pairs per dex
@@ -477,16 +521,31 @@ def cmc_discover_by_source(
                 f"{cfg.cmc_dex_base}/spot-pairs/latest"
                 f"?network_slug={cmc_chain}&limit={cfg.cmc_page_size}"
             )
+            
+            # Add category if specified
+            if category != "all":
+                base_url += f"&category={category}"
+            
             scroll_id = None
-            pages_planned = max(1, page_limit)
             pages_iterated = 0
+            pages_planned = max(1, page_limit)
+            
             while pages_iterated < pages_planned:
-                url = base_url if not scroll_id else f"{base_url}&scroll_id={scroll_id}"
-                items_page, scroll_id = _fetch_page(url, pages_iterated + 1)
+                # FIX: Build URL with scroll_id for pagination
+                url = base_url
+                if scroll_id:
+                    url += f"&scroll_id={scroll_id}"
+                
+                items_page, next_scroll_id = _fetch_page(url, pages_iterated + 1)
+                
                 if items_page:
                     out.extend(items_page)
-                if not scroll_id:
+                
+                # FIX: Break if no more scroll_id or same scroll_id returned
+                if not next_scroll_id or next_scroll_id == scroll_id:
                     break
+                    
+                scroll_id = next_scroll_id
                 pages_iterated += 1
     else:
         # Unknown source - treat as general pools (v4 uses network_slug and scroll_id)
@@ -494,16 +553,31 @@ def cmc_discover_by_source(
             f"{cfg.cmc_dex_base}/spot-pairs/latest"
             f"?network_slug={cmc_chain}&limit={cfg.cmc_page_size}"
         )
+        
+        # Add category if specified
+        if category != "all":
+            base_url += f"&category={category}"
+        
         scroll_id = None
-        pages_planned = max(1, page_limit)
         pages_iterated = 0
+        pages_planned = max(1, page_limit)
+        
         while pages_iterated < pages_planned:
-            url = base_url if not scroll_id else f"{base_url}&scroll_id={scroll_id}"
-            items_page, scroll_id = _fetch_page(url, pages_iterated + 1)
+            # FIX: Build URL with scroll_id for pagination
+            url = base_url
+            if scroll_id:
+                url += f"&scroll_id={scroll_id}"
+            
+            items_page, next_scroll_id = _fetch_page(url, pages_iterated + 1)
+            
             if items_page:
                 out.extend(items_page)
-            if not scroll_id:
+            
+            # FIX: Break if no more scroll_id or same scroll_id returned
+            if not next_scroll_id or next_scroll_id == scroll_id:
                 break
+                
+            scroll_id = next_scroll_id
             pages_iterated += 1
 
     # de-duplicate by pool id
@@ -512,7 +586,10 @@ def cmc_discover_by_source(
         pid = it.get("pool")
         if pid and pid not in dedup:
             dedup[pid] = it
-    return list(dedup.values()), {"pages_done": pages_done, "scanned_pairs": scanned_pairs}
+    
+    result = list(dedup.values())
+    print(f"[discover][{chain}] Final: {len(result)} unique candidates from {scanned_pairs} scanned pairs")
+    return result, {"pages_done": pages_done, "scanned_pairs": scanned_pairs}
 
 
 def cmc_discover_candidates(

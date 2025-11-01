@@ -14,20 +14,34 @@ def normalize_address(chain: str, address: str | None) -> str:
 def is_token_native_pair(chain: str, base_token: Dict, quote_token: Dict) -> Tuple[bool, Dict, Dict]:
     """
     Convert pair to TOKEN/native if possible and return flag with normalized tokens.
-    Returns (True, token_side, native_side) if match found, else (False, base_token, quote_token).
+    FIX: More robust token comparison with case normalization
     """
     native_raw = next(iter(NATIVE_ADDR.get(chain, set())), None)
     if not native_raw:
         return False, base_token, quote_token
+    
+    # FIX: Normalize addresses for comparison
     native_cmp = normalize_address(chain, native_raw)
-
     b_addr = normalize_address(chain, (base_token.get("address") or ""))
     q_addr = normalize_address(chain, (quote_token.get("address") or ""))
 
+    # FIX: Also check symbols as fallback
+    b_symbol = (base_token.get("symbol") or "").upper()
+    q_symbol = (quote_token.get("symbol") or "").upper()
+    native_symbols = {s.upper() for s in NATIVE_SYMBOLS.get(chain, set())}
+
+    # Check by address first (most reliable)
     if q_addr == native_cmp and b_addr != native_cmp:
         return True, base_token, quote_token
     if b_addr == native_cmp and q_addr != native_cmp:
         return True, quote_token, base_token
+    
+    # Fallback: check by symbol
+    if q_symbol in native_symbols and b_symbol not in native_symbols:
+        return True, base_token, quote_token
+    if b_symbol in native_symbols and q_symbol not in native_symbols:
+        return True, quote_token, base_token
+        
     return False, base_token, quote_token
 
 
