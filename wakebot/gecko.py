@@ -10,6 +10,32 @@ from .config import Config
 from .net_http import HttpClient
 
 
+# TTL cache for GT OHLCV per (chain, pool) -> (vol1h, prev24h, ok_age, source)
+_GT_OHLCV_CACHE: Dict[tuple[str, str], tuple[float, tuple[float, float, bool, str]]] = {}
+_GT_OHLCV_LOCK = threading.Lock()
+
+
+def _get_cached_cmc_ohlcv(key: tuple[str, str], ttl: int) -> tuple[float, float, bool, str] | None:
+    """Get cached OHLCV data (renamed from CMC but used for GT now)"""
+    now = time.time()
+    with _GT_OHLCV_LOCK:
+        item = _GT_OHLCV_CACHE.get(key)
+        if not item:
+            return None
+        ts, data = item
+        if now - ts < ttl:
+            return data
+        # expired
+        _GT_OHLCV_CACHE.pop(key, None)
+        return None
+
+
+def _set_cached_cmc_ohlcv(key: tuple[str, str], value: tuple[float, float, bool, str]) -> None:
+    """Set cached OHLCV data (renamed from CMC but used for GT now)"""
+    with _GT_OHLCV_LOCK:
+        _GT_OHLCV_CACHE[key] = (time.time(), value)
+
+
 def _normalize_gt_chain(chain: str) -> str:
     # GT uses 'eth' for Ethereum; others are unchanged
     return "eth" if chain == "ethereum" else chain
@@ -128,8 +154,6 @@ def fetch_gt_ohlcv_25h_with_age(
     key = (f"gt25_age:{chain}", pool_id)
     
     # Use separate cache for age-aware variant
-    from .cmc import _get_cached_cmc_ohlcv, _set_cached_cmc_ohlcv
-    
     cached = _get_cached_cmc_ohlcv(key, int(cfg.gecko_ttl_sec))
     if cached is not None:
         return cached
