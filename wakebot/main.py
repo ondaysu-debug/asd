@@ -13,20 +13,16 @@ from .alerts import (
 )
 from .config import Config
 from .discovery import unified_gt_discovery
-from .gecko import GeckoCache
-from .gt_data import GTDataService
 from .net_http import HttpClient
 from .storage import Storage
 
 
 def health_check(cfg: Config, logger=print) -> bool:
     """
-    Offline health check: validates configuration and dependencies without network calls.
-    Returns True/False and prints brief report.
+    Offline health check: validates configuration.
     """
     ok = True
     try:
-        # 1) Check config essentials
         if not cfg.chains or len(cfg.chains) == 0:
             logger("[health] FAIL: no chains configured")
             ok = False
@@ -40,32 +36,15 @@ def health_check(cfg: Config, logger=print) -> bool:
             logger(f"[health] gt_megafilter_base: {cfg.gt_megafilter_base} - OK")
         
         if not cfg.gt_megafilter_api_key:
-            logger("[health] WARN: GT_MEGAFILTER_API_KEY not set (may limit API access)")
+            logger("[health] WARN: GT_MEGAFILTER_API_KEY not set")
         else:
             logger(f"[health] gt_megafilter_api_key: ***{cfg.gt_megafilter_api_key[-4:]} - OK")
         
-        # 2) Check budget params
         if cfg.gt_megafilter_calls_per_min <= 0:
             logger("[health] FAIL: GT_MEGAFILTER_CALLS_PER_MIN must be > 0")
             ok = False
         else:
             logger(f"[health] gt_megafilter_calls_per_min: {cfg.gt_megafilter_calls_per_min} - OK")
-        
-        if cfg.gecko_calls_per_min <= 0:
-            logger("[health] FAIL: GECKO_CALLS_PER_MIN must be > 0")
-            ok = False
-        else:
-            logger(f"[health] gecko_calls_per_min: {cfg.gecko_calls_per_min} - OK")
-        
-        # 3) Check DB path writability
-        try:
-            db_parent = cfg.db_path.parent
-            if not db_parent.exists():
-                db_parent.mkdir(parents=True, exist_ok=True)
-            logger(f"[health] db_path: {cfg.db_path} - OK")
-        except Exception as e:
-            logger(f"[health] db_path: {cfg.db_path} - FAIL ({e})")
-            ok = False
         
         logger(f"[health] offline check: {'PASS' if ok else 'FAIL'}")
     
@@ -78,15 +57,11 @@ def health_check(cfg: Config, logger=print) -> bool:
 
 def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
     """
-    Enhanced online health check: tests GT Megafilter and OHLCV endpoints.
-    Returns True/False and prints detailed report.
+    Online health check: tests GT Megafilter endpoint.
     """
     ok = True
-    working_chains = []
-    failed_chains = []
     
     try:
-        # Test GT Megafilter endpoint
         logger("[health] Testing GT Megafilter endpoint...")
         test_url = f"{cfg.gt_megafilter_base}/pools/megafilter"
         test_params = {
@@ -107,20 +82,6 @@ def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
             logger(f"[health] ✗ GT Megafilter: Exception - {type(e).__name__}: {e}")
             ok = False
         
-        # Test GT OHLCV endpoint
-        logger("[health] Testing GT OHLCV endpoint...")
-        test_ohlcv_url = f"{cfg.gecko_base}/networks/eth/pools"
-        try:
-            ohlcv_doc = http.gt_get_json(test_ohlcv_url, timeout=10.0) or {}
-            if ohlcv_doc.get("data"):
-                logger(f"[health] ✓ GT OHLCV: OK")
-            else:
-                logger(f"[health] ⚠️  GT OHLCV: No data returned")
-                ok = False
-        except Exception as e:
-            logger(f"[health] ✗ GT OHLCV: Exception - {type(e).__name__}: {e}")
-            ok = False
-        
         logger(f"\n[health] Summary: {'PASS' if ok else 'FAIL'}")
     
     except Exception as e:
@@ -130,30 +91,24 @@ def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
     return ok
 
 
-def run_once(cfg: Config, *, cycle_idx: int) -> dict:
+def run_minute_cycle(cfg: Config, *, cycle_idx: int) -> dict:
     """
-    Обновленный цикл с GT Megafilter discovery + GT OHLCV monitoring
+    Упрощенный минутный цикл с единым Megafilter запросом
     """
     http = HttpClient(cfg)
     storage = Storage(cfg)
-    cache = GeckoCache(cfg.gecko_ttl_sec)
     notifier = Notifier(cfg)
-    gt_service = GTDataService(cfg, http, cache)
 
-    print(f"Wake-up bot started (GeckoTerminal Megafilter). Chains: {', '.join(cfg.chains)}")
-    print(f"Using Megafilter for discovery, OHLCV for monitoring")
-    print(f"Minimum pool age: {cfg.revival_min_age_days} days")
-    print(f"Save candidates: {cfg.save_candidates} -> {cfg.candidates_path}")
-    if cfg.max_cycles:
-        print(f"Max cycles: {cfg.max_cycles}")
-
-    total_scanned = 0
-    cycle_ok = True
+    if cycle_idx == 1:
+        print(f"🚀 Minute-cycle bot started. Chains: {', '.join(cfg.chains)}")
+        print(f"📊 Using Megafilter for discovery + monitoring")
+        print(f"⏰ Min pool age: {cfg.revival_min_age_days} days")
+        print(f"🔄 Cycle duration: {cfg.loop_seconds}s")
 
     # Сбрасываем счетчики цикла
     http.reset_cycle_counters()
 
-    # Discovery через GT Megafilter
+    # 1. ЕДИНЫЙ ЗАПРОС: discovery + monitoring данные
     aggregated: list[dict] = []
     per_chain_stats: dict[str, dict] = {}
     
@@ -170,12 +125,10 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
                     items, stats = fut.result()
                     aggregated.extend(items or [])
                     per_chain_stats[chain_name] = stats or {}
-                    total_scanned += int((stats or {}).get('scanned_pairs', 0))
                 except Exception as e:
                     print(f"[{chain_name}] GT discovery error: {e}")
-                    cycle_ok = False
 
-    # Log candidates в JSONL если включено
+    # 2. Логирование кандидатов
     if aggregated and cfg.save_candidates:
         now_iso = datetime.now(timezone.utc).isoformat()
         for rec in aggregated:
@@ -183,205 +136,158 @@ def run_once(cfg: Config, *, cycle_idx: int) -> dict:
             out['ts'] = now_iso
             storage.append_jsonl(out)
 
-    # Compute dynamic budget для OHLCV probes (GT only now)
-    total_budget = int(cfg.gecko_calls_per_min * (cfg.loop_seconds / 60.0))
-    discovery_cost = sum(int((per_chain_stats.get(ch, {}) or {}).get('pages_planned', 0)) for ch in (cfg.chains or []))
-    spent_so_far = int(http.get_cycle_requests() + http.get_cycle_penalty())
-    
-    available_for_ohlcv = max(0, total_budget - discovery_cost - int(cfg.gecko_safety_budget))
-    ohlcv_budget = int(min(available_for_ohlcv, cfg.max_ohlcv_probes_cap))
-    if available_for_ohlcv > 0:
-        ohlcv_budget = int(max(cfg.min_ohlcv_probes, ohlcv_budget))
-    else:
-        ohlcv_budget = 0
-        
-    print(f"[budget] total={total_budget}, discovery_cost={discovery_cost}, spent={spent_so_far}, "
-          f"avail_ohlcv={available_for_ohlcv}, final_ohlcv_budget={ohlcv_budget}")
-
-    # Seen-cache per chain чтобы избежать траты бюджета на недавно проверенные пулы
+    # 3. Получаем recently_seen для оптимизации
     recently_seen_by_chain: dict[str, set[str]] = {}
     with storage.get_conn() as conn:
         for chain in cfg.chains:
             recently_seen_by_chain[chain] = storage.get_recently_seen(conn, chain, cfg.seen_ttl_min)
+
+    # 4. НЕПОСРЕДСТВЕННАЯ обработка алертов
+    alerts_sent = 0
+    processed_pools = 0
+    skipped_seen = 0
+    skipped_cooldown = 0
     
-    candidates = [m for m in aggregated if m.get('pool') not in recently_seen_by_chain.get(m.get('chain'), set())]
-    skipped_seen = max(0, len(aggregated) - len(candidates))
-
-    # Сортировка и ограничение OHLCV probes по ликвидности и транзакциям
-    if candidates:
-        candidates.sort(
-            key=lambda m: (
-                float(m.get('liquidity', 0.0)),
-                int(m.get('tx24h', 0)),
-            ),
-            reverse=True,
-        )
-    
-    selected = candidates[:ohlcv_budget] if ohlcv_budget > 0 else []
-
-    # Распределение выбранных кандидатов по сетям для логирования
-    per_chain_selection: dict[str, int] = {}
-    for m in selected:
-        ch = m.get('chain')
-        per_chain_selection[ch] = per_chain_selection.get(ch, 0) + 1
-
-    # Параллельный fetch + алерты
-    if selected:
-        workers = max(1, min(len(selected), cfg.alert_fetch_workers))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {}
-            probed_total = 0
-            probed_ok = 0
-            alerts_by_chain: dict[str, int] = {}
+    for pool in aggregated:
+        # Пропускаем recently seen
+        if pool['pool'] in recently_seen_by_chain.get(pool['chain'], set()):
+            skipped_seen += 1
+            continue
             
-            for meta in selected:
-                inputs = AlertInputs(
-                    chain=meta['chain'],
-                    pool=meta['pool'],
-                    url=meta.get('url', ''),
-                    token_symbol=meta.get('baseSymbol', ''),
-                    token_addr=meta.get('baseAddr', ''),
-                    liquidity=float(meta.get('liquidity', 0.0)),
-                    pool_created_at=str(meta.get('pool_created_at', '')),
-                    volume_24h=float(meta.get('volume_24h', 0.0))
-                )
-                
-                def _work(inp: AlertInputs):
-                    # Cooldown проверка
-                    with storage.get_conn() as conn:
-                        last = storage.get_last_alert_ts(conn, inp.pool)
-                        if last:
-                            last_dt = datetime.fromtimestamp(int(last), tz=timezone.utc)
-                            if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cfg.cooldown_min):
-                                return {"probed": True, "probed_ok": True, "alert": False, "chain": inp.chain, "source": "GT"}
+        processed_pools += 1
+        
+        # Проверяем cooldown
+        with storage.get_conn() as conn:
+            last_alert = storage.get_last_alert_ts(conn, pool['pool'])
+            if last_alert:
+                last_dt = datetime.fromtimestamp(int(last_alert), tz=timezone.utc)
+                if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cfg.cooldown_min):
+                    skipped_cooldown += 1
+                    continue
 
-                    # Используем GT DATA SERVICE
-                    vol1h, vol24h, ok_age, source = gt_service.fetch_volume_metrics(inp.chain, inp.pool, inp.pool_created_at)
-                    
-                    # Отмечаем как проверенные независимо от результата алерта
-                    with storage.get_conn() as conn:
-                        storage.mark_as_seen(conn, inp.chain, inp.pool)
+        # Данные УЖЕ в ответе Megafilter
+        vol1h = pool.get('volume_1h', 0.0)
+        vol24h = pool.get('volume_24h', 0.0)
+        pool_age_days = pool.get('pool_age_days', 0)
+        pool_age_ok = pool_age_days >= cfg.revival_min_age_days
 
-                    # Используем GT функцию проверки
-                    if not should_alert_revival_gt(vol1h, vol24h, ok_age, cfg):
-                        return {"probed": True, "probed_ok": True, "alert": False, "chain": inp.chain, "source": source}
-                    
-                    # Отправляем алерт и устанавливаем cooldown
-                    text = build_revival_text_gt(inp, inp.chain.capitalize(), vol1h, vol24h, source)
-                    notifier.send(text)
-                    
-                    with storage.get_conn() as conn:
-                        storage.set_last_alert_ts(conn, inp.pool, int(datetime.now(timezone.utc).timestamp()))
-                    
-                    return {"probed": True, "probed_ok": True, "alert": True, "chain": inp.chain, "source": source}
-
-                futures[pool.submit(_work, inputs)] = inputs.pool
+        # Проверяем условие алерта
+        if should_alert_revival_gt(vol1h, vol24h, pool_age_ok, cfg):
+            # Создаем inputs для алерта
+            inputs = AlertInputs(
+                chain=pool['chain'],
+                pool=pool['pool'],
+                url=pool.get('url', ''),
+                token_symbol=pool.get('baseSymbol', ''),
+                token_addr=pool.get('baseAddr', ''),
+                liquidity=float(pool.get('liquidity', 0.0)),
+                pool_created_at=pool.get('pool_created_at', ''),
+                volume_24h=vol24h
+            )
             
-            for fut in as_completed(futures):
-                try:
-                    res = fut.result()
-                    probed_total += 1
-                    if isinstance(res, dict) and res.get('probed_ok'):
-                        probed_ok += 1
-                        if res.get('alert'):
-                            ch = res.get('chain') or '?'
-                            alerts_by_chain[ch] = alerts_by_chain.get(ch, 0) + 1
-                except Exception as e:
-                    pid = futures[fut]
-                    print(f"[alert] {pid} error: {e}")
-    else:
-        probed_total = 0
-        probed_ok = 0
-        alerts_by_chain = {}
+            # Отправляем алерт
+            text = build_revival_text_gt(
+                inputs,
+                pool['chain'].capitalize(),
+                vol1h,
+                vol24h,
+                "GeckoTerminal Megafilter"
+            )
+            notifier.send(text)
+            
+            # Устанавливаем cooldown
+            with storage.get_conn() as conn:
+                storage.set_last_alert_ts(conn, pool['pool'], int(datetime.now(timezone.utc).timestamp()))
+            
+            alerts_sent += 1
+
+        # Отмечаем пул как обработанный (для seen-cache)
+        with storage.get_conn() as conn:
+            storage.mark_as_seen(conn, pool['chain'], pool['pool'])
 
     # Очистка старых seen записей
     with storage.get_conn() as conn:
         storage.purge_seen_older_than(conn, cfg.seen_ttl_sec)
 
-    # Сводка по сетям
-    for chain in cfg.chains:
-        scanned_cnt = int((per_chain_stats.get(chain, {}) or {}).get('scanned_pairs', 0))
-        cand_cnt = len([m for m in candidates if m.get('chain') == chain])
-        probes = int(per_chain_selection.get(chain, 0))
-        alerts_cnt = int(alerts_by_chain.get(chain, 0))
-        print(f"[cycle] {chain}: scanned={scanned_cnt}, candidates={cand_cnt}, ohlcv_probes={probes}, alerts={alerts_cnt}")
-
-    # Общая сводка
-    used = len(selected)
-    print(f"[cycle] total scanned: {total_scanned} pools; OHLCV used: {used}/{ohlcv_budget}")
+    # Сводка цикла
+    total_scanned = sum(int(stats.get('scanned_pairs', 0)) for stats in per_chain_stats.values())
     
-    # Метрики rate limit
-    print(f"[rate] req={http.get_cycle_requests()} 429={http.get_cycle_429()} "
-          f"penalty={http.get_cycle_penalty():.2f}s")
+    print(f"📈 [cycle {cycle_idx}] Scanned: {total_scanned}, Processed: {processed_pools}, Alerts: {alerts_sent}")
+    print(f"⏭️  [cycle {cycle_idx}] Skipped: seen={skipped_seen}, cooldown={skipped_cooldown}")
+    print(f"⚡ [cycle {cycle_idx}] Requests: {http.get_cycle_requests()}, 429s: {http.get_cycle_429()}")
     
     # Мониторинг здоровья rate limiters
     http.log_ratelimit_health("megafilter")
-    http.log_ratelimit_health("gt")
-    
-    # Сводка здоровья
-    discovery_pages_done = sum(int((per_chain_stats.get(ch, {}) or {}).get('pages_done', 0)) for ch in (cfg.chains or []))
-    discovery_pages_planned = sum(int((per_chain_stats.get(ch, {}) or {}).get('pages_planned', 0)) for ch in (cfg.chains or []))
-    
-    print(f"[health] ok={str(cycle_ok).lower()} discovery_pages={discovery_pages_done}/{discovery_pages_planned} "
-          f"scanned={total_scanned} ohlcv_used={used}/{ohlcv_budget}")
-    
+
     return {
-        "ok": cycle_ok,
-        "scanned": total_scanned,
-        "ohlcv_used": used,
-        "ohlcv_budget": ohlcv_budget,
-        "discovery_pages_done": discovery_pages_done,
-        "discovery_pages_planned": discovery_pages_planned,
+        "ok": True,
+        "processed_pools": processed_pools,
+        "alerts_sent": alerts_sent,
+        "total_scanned": total_scanned,
+        "skipped_seen": skipped_seen,
+        "skipped_cooldown": skipped_cooldown,
+        "requests": http.get_cycle_requests(),
+        "429s": http.get_cycle_429(),
     }
 
 
-def main(args_list: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Wake-up bot with GeckoTerminal Megafilter")
-    parser.add_argument("--health-check", action="store_true", help="Run offline health check only")
-    parser.add_argument("--health-check-online", action="store_true", help="Run online health check only")
-    parser.add_argument("--env", type=str, default=None, help="Path to .env file")
-    args = parser.parse_args(args_list)
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Wake-up bot with 1-minute Megafilter cycles")
+    parser.add_argument("--once", action="store_true", help="run single cycle and exit")
+    parser.add_argument("--health-check", action="store_true", help="run offline health check and exit")
+    parser.add_argument("--health-check-online", action="store_true", help="run online health check and exit")
+    args = parser.parse_args(argv)
 
-    cfg = Config.load(env_path=args.env, override=True)
+    cfg = Config.load()
 
     if args.health_check:
         ok = health_check(cfg, logger=print)
-        exit(0 if ok else 1)
+        print(f"[health] Result: {'PASS' if ok else 'FAIL'}")
+        import sys
+        sys.exit(0 if ok else 1)
     
     if args.health_check_online:
         http = HttpClient(cfg)
         ok = health_check_online(cfg, http, logger=print)
-        exit(0 if ok else 1)
+        print(f"[health] Result: {'PASS' if ok else 'FAIL'}")
+        import sys
+        sys.exit(0 if ok else 1)
 
-    # Main loop
-    cycle_idx = 1
+    cycle_idx = 0
+    if args.once:
+        cycle_idx = 1
+        result = run_minute_cycle(cfg, cycle_idx=cycle_idx)
+        return
+
+    # Минутные циклы
+    print("=" * 60)
+    print("🚀 Starting 1-minute cycle bot")
+    print("=" * 60)
+    
     while True:
-        print(f"\n{'=' * 60}\nCycle {cycle_idx}\n{'=' * 60}")
-        cycle_start = time.monotonic()
+        cycle_idx += 1
+        cycle_started = time.monotonic()
         
         try:
-            stats = run_once(cfg, cycle_idx=cycle_idx)
-            if not stats.get("ok", True):
-                print("[cycle] Some issues detected, but continuing...")
+            result = run_minute_cycle(cfg, cycle_idx=cycle_idx)
         except Exception as e:
-            print(f"[cycle] Fatal error: {e}")
+            print(f"❌ [cycle {cycle_idx}] Fatal error: {e}")
             import traceback
             traceback.print_exc()
+
+        elapsed = time.monotonic() - cycle_started
+        sleep_for = max(0.0, cfg.loop_seconds - elapsed)
         
-        cycle_elapsed = time.monotonic() - cycle_start
-        print(f"[cycle] elapsed: {cycle_elapsed:.1f}s")
-        
-        # Check if we've reached max_cycles
-        if cfg.max_cycles > 0 and cycle_idx >= cfg.max_cycles:
-            print(f"[cycle] Reached max cycles ({cfg.max_cycles}), exiting...")
-            break
-        
-        # Sleep until next cycle
-        if cycle_elapsed < cfg.loop_seconds:
-            sleep_time = cfg.loop_seconds - cycle_elapsed
-            print(f"[cycle] sleeping for {sleep_time:.1f}s until next cycle...")
-            time.sleep(sleep_time)
+        if sleep_for > 0:
+            print(f"⏳ [cycle {cycle_idx}] Complete in {elapsed:.2f}s, sleeping {sleep_for:.2f}s\n")
+            time.sleep(sleep_for)
         else:
-            print(f"[cycle] Cycle took longer than loop_seconds ({cfg.loop_seconds}s), starting next cycle immediately")
-        
-        cycle_idx += 1
+            print(f"⚠️  [cycle {cycle_idx}] Overran by {-sleep_for:.2f}s\n")
+
+        if cfg.max_cycles and cycle_idx >= cfg.max_cycles:
+            print(f"🛑 [cycle {cycle_idx}] Reached MAX_CYCLES={cfg.max_cycles}, stopping")
+            break
+
+
+if __name__ == "__main__":
+    main()

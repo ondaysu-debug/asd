@@ -21,19 +21,12 @@ class Config:
     tg_chat_id: str
     tg_parse_mode: str
 
-    # GeckoTerminal Megafilter (primary discovery)
+    # GeckoTerminal Megafilter (единый источник данных)
     gt_megafilter_base: str
     gt_megafilter_api_key: str
     gt_megafilter_calls_per_min: int
     gt_megafilter_page_size: int
-    gt_megafilter_pages_per_cycle: int
     gt_megafilter_sort: str
-
-    # GeckoTerminal OHLCV (monitoring)
-    gecko_base: str
-    gecko_calls_per_min: int
-    gecko_retry_after_cap_s: float
-    gecko_ttl_sec: int
 
     # Filters
     fdv_min: float
@@ -43,12 +36,6 @@ class Config:
     tx24h_max: int
     chains: List[str]
     revival_min_age_days: int  # 7 days minimum pool age
-
-    # Budget for OHLCV probes (dynamic per cycle)
-    max_ohlcv_probes_cap: int
-    gecko_safety_budget: int
-    min_ohlcv_probes: int
-    max_ohlcv_probes: int
 
     # Loop/concurrency
     cooldown_min: int
@@ -81,19 +68,12 @@ class Config:
         tg_chat_id = os.getenv("TG_CHAT_ID", "")
         tg_parse_mode = os.getenv("TG_PARSE_MODE", "Markdown")
 
-        # GeckoTerminal Megafilter (primary discovery)
+        # GeckoTerminal Megafilter (единый источник данных)
         gt_megafilter_base = os.getenv("GT_MEGAFILTER_BASE", "https://pro-api.coingecko.com/api/v3/onchain")
         gt_megafilter_api_key = os.getenv("GT_MEGAFILTER_API_KEY", "")
-        gt_megafilter_calls_per_min = int(os.getenv("GT_MEGAFILTER_CALLS_PER_MIN", "60"))
+        gt_megafilter_calls_per_min = int(os.getenv("GT_MEGAFILTER_CALLS_PER_MIN", "30"))  # 1 запрос в минуту
         gt_megafilter_page_size = int(os.getenv("GT_MEGAFILTER_PAGE_SIZE", "100"))
-        gt_megafilter_pages_per_cycle = int(os.getenv("GT_MEGAFILTER_PAGES_PER_CYCLE", "3"))
         gt_megafilter_sort = os.getenv("GT_MEGAFILTER_SORT", "h6_trending")
-
-        # GeckoTerminal OHLCV (monitoring)
-        gecko_base = os.getenv("GECKO_BASE", "https://api.geckoterminal.com/api/v2")
-        gecko_calls_per_min = int(os.getenv("GECKO_CALLS_PER_MIN", "60"))
-        gecko_retry_after_cap_s = float(os.getenv("GECKO_RETRY_AFTER_CAP_S", "15.0"))
-        gecko_ttl_sec = int(os.getenv("GECKO_TTL_SEC", "60"))
 
         # Filters
         fdv_min = float(os.getenv("FDV_MIN", "50000"))
@@ -104,12 +84,6 @@ class Config:
         chains_raw = os.getenv("CHAINS", "base,ethereum,solana")
         chains = [c.strip().lower() for c in chains_raw.split(",") if c.strip()]
         revival_min_age_days = int(os.getenv("REVIVAL_MIN_AGE_DAYS", "7"))  # 7 ДНЕЙ
-
-        # Budget for OHLCV probes (dynamic per cycle)
-        max_ohlcv_probes_cap = int(os.getenv("MAX_OHLCV_PROBES_CAP", "100"))
-        gecko_safety_budget = int(os.getenv("GECKO_SAFETY_BUDGET", "10"))
-        min_ohlcv_probes = int(os.getenv("MIN_OHLCV_PROBES", "5"))
-        max_ohlcv_probes = int(os.getenv("MAX_OHLCV_PROBES", str(max_ohlcv_probes_cap)))
 
         # Loop/concurrency
         cooldown_min = int(os.getenv("COOLDOWN_MIN", "30"))
@@ -142,12 +116,7 @@ class Config:
             gt_megafilter_api_key=gt_megafilter_api_key,
             gt_megafilter_calls_per_min=gt_megafilter_calls_per_min,
             gt_megafilter_page_size=gt_megafilter_page_size,
-            gt_megafilter_pages_per_cycle=gt_megafilter_pages_per_cycle,
             gt_megafilter_sort=gt_megafilter_sort,
-            gecko_base=gecko_base,
-            gecko_calls_per_min=gecko_calls_per_min,
-            gecko_retry_after_cap_s=gecko_retry_after_cap_s,
-            gecko_ttl_sec=gecko_ttl_sec,
             fdv_min=fdv_min,
             fdv_max=fdv_max,
             liquidity_min=liquidity_min,
@@ -155,10 +124,6 @@ class Config:
             tx24h_max=tx24h_max,
             chains=chains,
             revival_min_age_days=revival_min_age_days,
-            max_ohlcv_probes_cap=max_ohlcv_probes_cap,
-            gecko_safety_budget=gecko_safety_budget,
-            min_ohlcv_probes=min_ohlcv_probes,
-            max_ohlcv_probes=max_ohlcv_probes,
             cooldown_min=cooldown_min,
             loop_seconds=loop_seconds,
             chain_scan_workers=chain_scan_workers,

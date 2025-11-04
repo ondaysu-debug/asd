@@ -195,11 +195,11 @@ def should_alert_revival_gt(vol1h: float, prev24h: float, ok_age: bool, cfg: Con
     return float(vol1h) > float(prev24h) * float(cfg.alert_ratio_min)
 
 
-def build_revival_text_gt(meta: AlertInputs, chain_label: str, vol1h: float, prev24h: float, source: str = "GeckoTerminal") -> str:
+def build_revival_text_gt(meta: AlertInputs, chain_label: str, vol1h: float, prev24h: float, source: str = "GeckoTerminal Megafilter") -> str:
     """
     Build revival alert text with source indicator.
     
-    source: "GeckoTerminal OHLCV" или подобные
+    source: "GeckoTerminal Megafilter" для 1-минутных циклов
     """
     ratio = (float(vol1h) / float(prev24h)) if float(prev24h) > 0 else float("inf")
     return (
@@ -209,8 +209,9 @@ def build_revival_text_gt(meta: AlertInputs, chain_label: str, vol1h: float, pre
         f"Contract: `{_escape_markdown(meta.token_addr or 'n/a')}`\n"
         f"Liquidity: ${_nice(meta.liquidity)}\n\n"
         f"1h Vol: ${_nice(vol1h)}\n"
-        f"Prev 24h Vol: ${_nice(prev24h)}\n"
-        f"Ratio 1h/prev24h: {ratio:.2f}x\n"
+        f"24h Vol: ${_nice(prev24h)}\n"
+        f"Ratio 1h/24h: {ratio:.2f}x\n"
         f"Source: {_escape_markdown(source)}\n"
+        f"Cycle: 1-minute\n"
         f"Link: {_escape_markdown(meta.url)}"
     )

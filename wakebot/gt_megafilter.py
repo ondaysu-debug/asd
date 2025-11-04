@@ -86,7 +86,7 @@ class GTMegafilterClient:
     
     def _parse_megafilter_response(self, response: Dict, network: str) -> List[Dict]:
         """
-        Парсинг ответа megafilter и применение дополнительных фильтров
+        Парсинг ответа megafilter с ПОЛНЫМИ данными для немедленных алертов
         """
         pools = []
         
@@ -130,6 +130,10 @@ class GTMegafilterClient:
             if not is_base_token_acceptable(network, token_side):
                 continue
             
+            # Извлекаем volume данные
+            volume_usd = attributes.get('volume_usd', {})
+            transactions = attributes.get('transactions', {})
+            
             pool_data = {
                 'chain': network,
                 'pool': attributes.get('address', ''),
@@ -140,15 +144,18 @@ class GTMegafilterClient:
                 'quoteAddr': native_side.get('address', ''),
                 'liquidity': float(attributes.get('reserve_in_usd', 0)),
                 'fdv': float(attributes.get('fdv_usd', 0)),
-                'tx24h': attributes.get('transactions', {}).get('h24', {}).get('total', 0),
-                'volume_24h': float(attributes.get('volume_usd', {}).get('h24', 0)),
+                'tx24h': transactions.get('h24', {}).get('total', 0),
+                
+                # КРИТИЧЕСКИЕ ДАННЫЕ ДЛЯ НЕМЕДЛЕННЫХ АЛЕРТОВ:
+                'volume_1h': float(volume_usd.get('h1', 0)),
+                'volume_24h': float(volume_usd.get('h24', 0)),
                 'pool_created_at': attributes.get('pool_created_at', ''),
                 'pool_age_days': self._calculate_pool_age_days(attributes.get('pool_created_at', '')),
             }
             
             pools.append(pool_data)
             
-        print(f"[discover][{network}] Parsed {len(pools)} pools after filtering")
+        print(f"[discover][{network}] Parsed {len(pools)} pools with full metrics")
         return pools
     
     def _calculate_pool_age_days(self, pool_created_at: str) -> int:
