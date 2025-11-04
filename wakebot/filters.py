@@ -82,9 +82,25 @@ def is_base_token_acceptable(chain: str, token: Dict) -> bool:
     return True
 
 
-def pool_data_filters(liquidity: float, liq_min: float, liq_max: float, tx24h: int, tx24h_max: int) -> bool:
-    if not (liq_min <= liquidity <= liq_max):
+def pool_data_filters(
+    fdv: float,
+    fdv_min: float,
+    fdv_max: float,
+    tx24h: int,
+    tx24h_max: int,
+    pool_age_days: int = 0,
+    min_age_days: int = 7
+) -> bool:
+    """
+    Фильтры для pool data с поддержкой FDV и возраста пула
+    """
+    # FDV проверка
+    if not (fdv_min <= fdv <= fdv_max):
         return False
+    # Транзакции проверка
     if tx24h > tx24h_max:
+        return False
+    # Возраст пула проверка (7 дней минимум)
+    if pool_age_days < min_age_days:
         return False
     return True

@@ -1,42 +1,106 @@
-## WakeBot - Crypto Token Alert Bot
+## WakeBot - Crypto Token Alert Bot (GeckoTerminal Megafilter Edition)
 
-Reliable TOKEN/native discovery and alerts using CoinMarketCap DEX API (primary) with optional GeckoTerminal OHLCV fallback. Scans Base, Solana, Ethereum, and BSC, filters noise, fetches precise OHLCV windows, and sends Telegram notifications for REVIVAL signals.
+🚀 **Fully migrated to GeckoTerminal Megafilter architecture!**
 
-### Features
-- **Discovery (CMC DEX):**
-  - Sources: `new`, `trending`, raw `pools`, and `dexes/{dex}/pools`
-  - Rotation across sources per cycle with `CMC_ROTATE_SOURCES=true`
-  - Normalizes to TOKEN/native pairs (WETH on EVM, SOL on Solana)
+Reliable TOKEN/native discovery and alerts using **GeckoTerminal Megafilter** for discovery and **GeckoTerminal OHLCV** for monitoring. Scans Base, Ethereum, Solana, and more, filters noise with powerful Megafilter parameters, fetches precise OHLCV windows, and sends Telegram notifications for REVIVAL signals.
+
+### ✨ Key Features
+
+- **Discovery (GT Megafilter):**
+  - Single powerful endpoint: `/pools/megafilter`
+  - Advanced filtering: FDV, liquidity, volume, age, transactions
+  - Trending sorts: `h6_trending`, `h24_volume`, etc.
+  - **7-day minimum pool age** enforcement
+  - **NO honeypot checks** (clean data)
+  
 - **Filtering:**
   - Normalize addresses by chain
-  - Convert to TOKEN/native (WETH on EVM, SOL on Solana)
+  - Convert to TOKEN/native pairs (WETH on EVM, SOL on Solana)
   - Exclude majors/mimics by symbol/addresses
-  - Filter by liquidity range and `tx24h` max
-- **Metrics (CMC DEX OHLCV 25h):**
+  - Filter by FDV range, liquidity range, and tx24h max
+  - Age-based filtering (minimum 7 days)
+  
+- **Metrics (GT OHLCV 25h):**
   - Fetch 25 hourly candles per pool (`limit=25`)
   - Derive `vol1h` (last hour) and `prev24h` (24 hours before last)
-  - TTL cache for OHLCV results (configurable); optional GT fallback
+  - TTL cache for OHLCV results (configurable)
+  - Age verification through pool creation timestamp
+  
 - **Alerts:**
-  - REVIVAL rule: age >= `REVIVAL_MIN_AGE_DAYS`, `now_24h` >= min, `prev_week` <= max, and `now_24h / prev_week` >= `REVIVAL_RATIO_MIN` (optional `REVIVAL_USE_LAST_HOURS`)
+  - REVIVAL rule: age >= 7 days, `vol1h` > `prev24h` × `ALERT_RATIO_MIN`
+  - Minimum previous 24h volume threshold
   - Per-pool cooldown in SQLite
-  - Telegram notifications with Markdown escaping for dynamic fields
-- **Rate limiting (GeckoTerminal):**
-  - Global token-bucket with adaptive RPS control and max concurrency
+  - Telegram notifications with Markdown escaping
+  
+- **Rate limiting:**
+  - Separate rate limiters for Megafilter (Pro API) and OHLCV (Public API)
+  - Adaptive RPS control with max concurrency
   - Dynamic per-cycle HTTP budget with 429 penalty awareness
   - Respects `Retry-After` (seconds or HTTP-date) with configurable cap
   - 5xx retries (2 attempts) with small backoff
+  
 - **Concurrency:**
   - Multi-threaded chain scanning and alert fetch
+  
 - **Logging:**
   - Candidates logged to JSONL with timestamps
+  
 - **Resilience:**
   - Non-fatal HTTP/parse errors; skips and continues
 
-### Requirements
+### 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    GeckoTerminal Megafilter                  │
+│            (pro-api.coingecko.com/api/v3/onchain)           │
+│                                                              │
+│  Discovery with powerful filters:                           │
+│  • FDV range (min/max)                                      │
+│  • Liquidity range (min/max)                                │
+│  • 24h volume minimum                                       │
+│  • Pool age minimum (7 days = 168 hours)                   │
+│  • Transaction count maximum                                 │
+│  • NO honeypot checks                                       │
+└─────────────────┬───────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Additional Filters (wakebot/filters.py)         │
+│  • Native pair validation                                    │
+│  • Base token acceptance                                     │
+│  • Age verification (7 days)                                 │
+└─────────────────┬───────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  GeckoTerminal OHLCV                         │
+│           (api.geckoterminal.com/api/v2)                    │
+│                                                              │
+│  Monitoring with 25h candles:                               │
+│  • vol1h (last hour volume)                                 │
+│  • prev24h (previous 24 hours)                              │
+│  • Age verification                                          │
+└─────────────────┬───────────────────────────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────────────────────────┐
+│                        Alerts                                │
+│  • REVIVAL: vol1h > prev24h × ratio                         │
+│  • Age >= 7 days verified                                   │
+│  • Cooldown per pool                                         │
+│  • Telegram notifications                                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 📦 Requirements
+
 - Python 3.10+
 - Only standard library + `requests`, `python-dotenv` (and `pytest` for tests)
+- **GeckoTerminal Pro API key** for Megafilter access
 
-### Installation
+### 🚀 Installation
+
 ```bash
 python -m venv .venv
 . .venv/bin/activate  # Windows: .venv\\Scripts\\activate
@@ -44,104 +108,119 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` as needed.
+Edit `.env` with your configuration (see below).
 
-### Running
-- One cycle (for cron/k8s):
+### ▶️ Running
+
+**Health checks:**
 ```bash
-python -m wakebot.main --once
+# Offline check (validates configuration)
+python -m wakebot --health-check
+
+# Online check (tests GT Megafilter and OHLCV endpoints)
+python -m wakebot --health-check-online
 ```
-- Continuous loop:
+
+**Run the bot:**
 ```bash
+# Continuous loop
+python -m wakebot
+
+# Or use main module directly
 python -m wakebot.main
 ```
 
-You can also use the package entrypoint directly:
-```bash
-python -m wakebot --once   # single cycle
-python -m wakebot          # continuous
-```
+### ⚙️ Configuration (.env)
 
-### Configuration (.env)
 See `.env.example` for all variables. Key ones and defaults:
 
+**GeckoTerminal Megafilter (Discovery):**
 | Variable | Default | Notes |
 |---|---|---|
-| `CMC_DEX_BASE` | `https://api.coinmarketcap.com/dexer/v3` | CMC DEX API base |
-| `CMC_DEX_BASE_ALT` | `https://pro-api.coinmarketcap.com/dexer/v3` | Alt base for retry |
-| `CMC_API_KEY` | `` | API key (optional) |
-| `CMC_CALLS_PER_MIN` | `28` | HTTP budget per minute |
-| `CMC_RETRY_AFTER_CAP_S` | `3` | Cap for Retry-After |
-| `CMC_SOURCES` | `new,trending,pools,dexes` | Discovery sources |
-| `CMC_ROTATE_SOURCES` | `true` | Rotate one source per cycle |
-| `CMC_PAGES_PER_CHAIN` | `2` | Pages per source per chain |
-| `CMC_DEX_PAGES_PER_CHAIN` | `1` | Pages per dex per chain |
-| `CMC_PAGE_SIZE` | `100` | Items per page |
-| `ALLOW_GT_OHLCV_FALLBACK` | `false` | Use GT OHLCV if CMC empty |
-| `GECKO_BASE` | `https://api.geckoterminal.com/api/v2` | GT base (fallback only) |
-| `LIQUIDITY_MIN` | `50000` | USD |
-| `LIQUIDITY_MAX` | `800000` | USD |
-| `TX24H_MAX` | `2000` | Buys + sells in 24h |
-| `GECKO_TTL_SEC` | `60` | TTL for OHLCV cache |
-| `MAX_OHLCV_PROBES_CAP` | `30` | Max per-cycle OHLCV probes |
-| `GECKO_SAFETY_BUDGET` | `4` | Reserve HTTP calls per cycle |
-| `MIN_OHLCV_PROBES` | `3` | Minimum probes if budget allows |
-| `ALERT_RATIO_MIN` | `1.0` | Optional classic 1h vs prev48 rule |
-| `SEEN_TTL_MIN` | `15` | Skip OHLCV for seen pools (minutes) |
-| `COOLDOWN_MIN` | `30` | Per-pool alert cooldown |
+| `GT_MEGAFILTER_BASE` | `https://pro-api.coingecko.com/api/v3/onchain` | Pro API base |
+| `GT_MEGAFILTER_API_KEY` | `` | **Required** - Your CoinGecko Pro API key |
+| `GT_MEGAFILTER_CALLS_PER_MIN` | `60` | Rate limit for Megafilter |
+| `GT_MEGAFILTER_PAGE_SIZE` | `100` | Results per page |
+| `GT_MEGAFILTER_PAGES_PER_CYCLE` | `3` | Pages per cycle |
+| `GT_MEGAFILTER_SORT` | `h6_trending` | Sort method |
+
+**GeckoTerminal OHLCV (Monitoring):**
+| Variable | Default | Notes |
+|---|---|---|
+| `GECKO_BASE` | `https://api.geckoterminal.com/api/v2` | Public API base |
+| `GECKO_CALLS_PER_MIN` | `60` | Rate limit for OHLCV |
+| `GECKO_RETRY_AFTER_CAP_S` | `15.0` | Cap for Retry-After |
+| `GECKO_TTL_SEC` | `60` | OHLCV cache TTL |
+
+**Filters:**
+| Variable | Default | Notes |
+|---|---|---|
+| `FDV_MIN` | `50000` | Minimum FDV in USD |
+| `FDV_MAX` | `800000` | Maximum FDV in USD |
+| `LIQUIDITY_MIN` | `50000` | Minimum liquidity in USD |
+| `LIQUIDITY_MAX` | `800000` | Maximum liquidity in USD |
+| `TX24H_MAX` | `2000` | Maximum 24h transactions |
+| `REVIVAL_MIN_AGE_DAYS` | `7` | **Minimum pool age (7 days)** |
+| `CHAINS` | `base,ethereum,solana` | Supported chains |
+
+**Budget and Rate Limiting:**
+| Variable | Default | Notes |
+|---|---|---|
+| `MAX_OHLCV_PROBES_CAP` | `100` | Max OHLCV probes per cycle |
+| `GECKO_SAFETY_BUDGET` | `10` | Reserve HTTP calls |
+| `MIN_OHLCV_PROBES` | `5` | Minimum probes if budget allows |
+
+**Alerting:**
+| Variable | Default | Notes |
+|---|---|---|
+| `ALERT_RATIO_MIN` | `1.0` | Min ratio for vol1h/prev24h |
+| `MIN_PREV24_USD` | `1000` | Min 24h volume in USD |
+| `COOLDOWN_MIN` | `30` | Per-pool alert cooldown (minutes) |
+| `SEEN_TTL_MIN` | `30` | Skip OHLCV for seen pools (minutes) |
+
+**Loop and Concurrency:**
+| Variable | Default | Notes |
+|---|---|---|
 | `LOOP_SECONDS` | `60` | Target loop duration |
-| `CHAIN_SCAN_WORKERS` | `4` | Parallel chains for discovery |
-| `ALERT_FETCH_WORKERS` | `8` | Parallel alert checks/sends |
-| `TG_PARSE_MODE` | `Markdown` | Telegram parse mode |
-| `CHAINS` | `base,solana,ethereum,bsc` | Supported: `ethereum`, `base`, `solana`, `bsc` |
+| `CHAIN_SCAN_WORKERS` | `4` | Parallel chain discovery |
+| `ALERT_FETCH_WORKERS` | `8` | Parallel alert checks |
+| `MAX_CYCLES` | `0` | Max cycles (0 = infinite) |
 
-Typical per-loop budget: planned pages + OHLCV probes (keep under `CMC_CALLS_PER_MIN`).
-
-Example `.env` snippet:
+**Example `.env` snippet:**
 
 ```bash
-# --- CMC DEX API ---
-CMC_DEX_BASE=https://api.coinmarketcap.com/dexer/v3
-CMC_DEX_BASE_ALT=https://pro-api.coinmarketcap.com/dexer/v3
-CMC_API_KEY=
+# GeckoTerminal Megafilter (Discovery)
+GT_MEGAFILTER_BASE=https://pro-api.coingecko.com/api/v3/onchain
+GT_MEGAFILTER_API_KEY=your_coingecko_pro_api_key
+GT_MEGAFILTER_CALLS_PER_MIN=60
 
-# limits and cache
-CMC_CALLS_PER_MIN=28
-CMC_RETRY_AFTER_CAP_S=3
+# GeckoTerminal OHLCV (Monitoring)
 GECKO_BASE=https://api.geckoterminal.com/api/v2
-GECKO_TTL_SEC=60
+GECKO_CALLS_PER_MIN=60
 
-# discovery sources
-CMC_SOURCES=new,trending,pools,dexes
-CMC_ROTATE_SOURCES=true
-CMC_PAGE_SIZE=100
-CMC_PAGES_PER_CHAIN=2
-CMC_DEX_PAGES_PER_CHAIN=1
-
-# budgets/limiter
-MAX_OHLCV_PROBES_CAP=30
-MIN_OHLCV_PROBES=3
-CMC_SAFETY_BUDGET=4
-
-# pre-check filters
+# Filters
+FDV_MIN=50000
+FDV_MAX=800000
 LIQUIDITY_MIN=50000
 LIQUIDITY_MAX=800000
 TX24H_MAX=2000
-
-# revival / alerts
 REVIVAL_MIN_AGE_DAYS=7
-MIN_PREV24_USD=1000
+
+# Chains
+CHAINS=base,ethereum,solana
+
+# Alerting
 ALERT_RATIO_MIN=1.0
-SEEN_TTL_MIN=15
+MIN_PREV24_USD=1000
+COOLDOWN_MIN=30
 
-# chains
-CHAINS=base,solana,ethereum,bsc
-
-# optional GT OHLCV fallback
-ALLOW_GT_OHLCV_FALLBACK=false
+# Telegram
+TG_BOT_TOKEN=your_telegram_bot_token
+TG_CHAT_ID=your_telegram_chat_id
 ```
 
-### Tests
+### 🧪 Tests
+
 Run unit tests:
 ```bash
 pytest -q
@@ -149,12 +228,46 @@ pytest -q
 
 Coverage includes:
 - Address normalization and TOKEN/native determination
-- Liquidity/tx filters
+- FDV and liquidity filters
+- Pool age verification (7 days)
 - Alert rule and cooldown
-- Throttler behavior and adaptive changes
-- Gecko TTL cache (no HTTP until TTL expiry)
+- Rate limiter behavior and adaptive changes
+- OHLCV cache TTL
 
-### Notes
-- Primary data source: CoinMarketCap DEX API; optional GeckoTerminal OHLCV fallback
+### 📚 Documentation
+
+- **Migration Guide**: See `GT_MEGAFILTER_MIGRATION.md` for detailed migration information
+- **Configuration**: See `.env.example` for all available parameters
+- **Architecture**: Fully documented in this README and migration guide
+
+### 🔑 Key Differences from Previous Version
+
+**Before (Hybrid CMC+GT):**
+- ❌ Complex dual API configuration
+- ❌ CMC rate limits
+- ❌ GT fallback complexity
+- ❌ Mixed data sources
+
+**After (Pure GT Megafilter):**
+- ✅ Single unified architecture
+- ✅ Powerful Megafilter discovery
+- ✅ Dedicated OHLCV monitoring
+- ✅ Simplified configuration
+- ✅ Better filtering capabilities
+- ✅ **NO honeypot checks**
+- ✅ **7-day age enforcement at all levels**
+
+### 📝 Notes
+
+- **Primary data source**: GeckoTerminal Megafilter (Pro API) for discovery
+- **Monitoring**: GeckoTerminal OHLCV (Public API) for volume metrics
+- **Age verification**: 7-day minimum enforced at discovery, filtering, and alerting levels
+- **No honeypot checks**: Clean data without honeypot verification overhead
 - Works on Windows, macOS, Linux; no POSIX-only dependencies
 - No Docker/Poetry required (optional to add later)
+
+### 🎉 Migration Complete
+
+This version represents a complete migration from the hybrid CMC+GT architecture to a pure GeckoTerminal implementation. All CMC dependencies have been removed, and the codebase has been significantly simplified while maintaining all core functionality.
+
+For detailed migration information, see `GT_MEGAFILTER_MIGRATION.md`.

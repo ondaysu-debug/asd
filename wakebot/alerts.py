@@ -22,6 +22,7 @@ class AlertInputs:
     token_addr: str
     liquidity: float
     pool_created_at: str = ""
+    volume_24h: float = 0.0
 
 
 class Notifier:
@@ -180,21 +181,25 @@ def build_revival_text(meta: AlertInputs, chain_label: str, w: RevivalWindow) ->
     )
 
 
-# --------- New CMC revival helpers (1h vs prev24h) ---------
+# --------- GT revival helpers (1h vs prev24h) ---------
 
-def should_alert_revival_cmc(vol1h: float, prev24h: float, ok_age: bool, cfg: Config) -> bool:
-    if not ok_age:
+def should_alert_revival_gt(vol1h: float, prev24h: float, ok_age: bool, cfg: Config) -> bool:
+    """
+    Проверка условий для алерта через GT
+    Сохраняет проверку 7-дневного возраста
+    """
+    if not ok_age:  # 👈 ok_age = pool_age_days >= revival_min_age_days (7)
         return False
     if not (prev24h >= float(cfg.min_prev24_usd)):
         return False
     return float(vol1h) > float(prev24h) * float(cfg.alert_ratio_min)
 
 
-def build_revival_text_cmc(meta: AlertInputs, chain_label: str, vol1h: float, prev24h: float, source: str = "CMC DEX") -> str:
+def build_revival_text_gt(meta: AlertInputs, chain_label: str, vol1h: float, prev24h: float, source: str = "GeckoTerminal") -> str:
     """
     Build revival alert text with source indicator.
     
-    source: "CMC DEX" or "CMC→GT fallback" or similar
+    source: "GeckoTerminal OHLCV" или подобные
     """
     ratio = (float(vol1h) / float(prev24h)) if float(prev24h) > 0 else float("inf")
     return (
