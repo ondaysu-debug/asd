@@ -12,7 +12,7 @@ from .alerts import (
     should_alert_revival_gt,
 )
 from .config import Config
-from .discovery import unified_gt_discovery
+from .discovery import unified_gt_discovery, unified_quicknode_discovery
 from .net_http import HttpClient
 from .storage import Storage
 
@@ -89,6 +89,185 @@ def health_check_online(cfg: Config, http: HttpClient, logger=print) -> bool:
         ok = False
     
     return ok
+
+
+def run_quicknode_cycle(cfg: Config, *, cycle_idx: int) -> dict:
+    """
+    Обновленный главный цикл полностью на QuickNode
+    """
+    from .quicknode.volume_monitor import QuickNodeVolumeMonitor
+    from .storage import Storage
+    from .alerts import should_alert_revival_gt, build_revival_text_gt, AlertInputs
+    
+    http = HttpClient(cfg)
+    storage = Storage(cfg)
+    notifier = Notifier(cfg)
+    
+    # Инициализация монитора объемов
+    volume_monitor = QuickNodeVolumeMonitor(cfg, http)
+    
+    # Кеш для мониторинга пулов между циклами
+    cache_file = storage.db_path.parent / "quicknode_pools_cache.json"
+    
+    if cycle_idx == 1:
+        print(f"🚀 QuickNode cycle bot started. Chains: {', '.join(cfg.chains)}")
+        print(f"📊 Using QuickNode for discovery + monitoring")
+        print(f"⏰ Min pool age: {cfg.revival_min_age_days} days")
+        print(f"🔄 Pool refresh interval: {cfg.pool_refresh_interval_hours} hours")
+        print(f"📈 Max monitored pools: {cfg.max_monitored_pools}")
+
+    http.reset_cycle_counters()
+    
+    # Определяем тип цикла: full refresh или monitoring only
+    should_refresh = (cycle_idx == 1 or 
+                     cycle_idx % (cfg.pool_refresh_interval_hours * 60 // cfg.loop_seconds) == 0)
+    
+    if should_refresh:
+        print(f"🔄 [cycle {cycle_idx}] Full pool refresh via QuickNode...")
+        
+        aggregated_pools = []
+        per_chain_stats = {}
+        
+        # Параллельный сбор по всем сетям
+        if cfg.chains:
+            max_workers = min(len(cfg.chains), cfg.chain_scan_workers)
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {}
+                for chain in cfg.chains:
+                    futures[pool.submit(unified_quicknode_discovery, cfg, http, storage, chain, cycle_idx)] = chain
+                
+                for fut in as_completed(futures):
+                    chain_name = futures[fut]
+                    try:
+                        items, stats = fut.result()
+                        aggregated_pools.extend(items or [])
+                        per_chain_stats[chain_name] = stats or {}
+                    except Exception as e:
+                        print(f"[{chain_name}] QuickNode discovery error: {e}")
+        
+        # Лимитируем количество мониторимых пулов
+        monitored_pools = aggregated_pools[:cfg.max_monitored_pools]
+        print(f"✅ [cycle {cycle_idx}] Total pools for monitoring: {len(monitored_pools)}")
+        
+        # Сохраняем в кеш
+        import json
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(monitored_pools, f)
+        except Exception as e:
+            print(f"Warning: Could not cache pools: {e}")
+    else:
+        # Используем закешированные пулы
+        print(f"📊 [cycle {cycle_idx}] Monitoring cached pools...")
+        import json
+        try:
+            with open(cache_file, 'r') as f:
+                monitored_pools = json.load(f)
+        except Exception as e:
+            print(f"Warning: Could not load cached pools: {e}, will refresh")
+            monitored_pools = []
+    
+    # 2. МОНИТОРИНГ ОБЪЕМОВ (каждый цикл)
+    alerts_sent = 0
+    if monitored_pools:
+        print(f"📊 [cycle {cycle_idx}] Monitoring {len(monitored_pools)} pools...")
+        updated_pools = volume_monitor.update_volumes_batch(monitored_pools)
+        
+        # 3. ПРОВЕРКА АЛЕРТОВ
+        alerts_sent = process_quicknode_alerts(updated_pools, storage, notifier, cfg)
+        
+        # 4. ОБНОВЛЯЕМ КЭШ с новыми объемами
+        import json
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(updated_pools, f)
+        except Exception:
+            pass
+    
+    # Логирование
+    print(f"⚡ [cycle {cycle_idx}] Alerts sent: {alerts_sent}")
+    print(f"⚡ [cycle {cycle_idx}] Requests: {http.get_cycle_requests()}, 429s: {http.get_cycle_429()}")
+    http.log_ratelimit_health("quicknode")
+    
+    return {
+        "ok": True,
+        "monitored_pools": len(monitored_pools) if monitored_pools else 0,
+        "alerts_sent": alerts_sent,
+        "cycle_type": "quicknode",
+        "refresh_done": should_refresh
+    }
+
+
+def process_quicknode_alerts(pools: List[Dict], storage: Storage, notifier: Notifier, cfg: Config) -> int:
+    """
+    Обработка алертов для QuickNode пулов
+    """
+    from .alerts import should_alert_revival_gt, build_revival_text_gt, AlertInputs
+    from datetime import datetime, timedelta, timezone
+    
+    alerts_sent = 0
+    
+    for pool in pools:
+        pool_id = pool.get('pool') or pool.get('address')
+        if not pool_id:
+            continue
+        
+        # Проверяем cooldown
+        with storage.get_conn() as conn:
+            last_alert = storage.get_last_alert_ts(conn, pool_id)
+            if last_alert:
+                last_dt = datetime.fromtimestamp(int(last_alert), tz=timezone.utc)
+                if datetime.now(timezone.utc) - last_dt < timedelta(minutes=cfg.cooldown_min):
+                    continue
+        
+        vol1h = pool.get('volume_1h', 0.0)
+        vol24h = pool.get('volume_24h', 0.0)
+        pool_age_days = pool.get('pool_age_days', 0)
+        pool_age_ok = pool_age_days >= cfg.revival_min_age_days
+        
+        # Проверяем условие алерта
+        if should_alert_revival_gt(vol1h, vol24h, pool_age_ok, cfg):
+            # Создаем inputs для алерта
+            chain = pool.get('chain', 'unknown')
+            base_symbol = pool.get('baseSymbol', 'UNKNOWN')
+            base_addr = pool.get('baseAddr') or pool.get('base_mint', '')
+            
+            # Формируем URL
+            if chain == "solana":
+                url = f"https://dexscreener.com/solana/{pool_id}"
+            else:
+                url = f"https://dexscreener.com/{chain}/{pool_id}"
+            
+            inputs = AlertInputs(
+                chain=chain,
+                pool=pool_id,
+                url=url,
+                token_symbol=base_symbol,
+                token_addr=base_addr,
+                liquidity=float(pool.get('liquidity_usd', 0.0)),
+                pool_created_at=pool.get('pool_created_at', ''),
+                volume_24h=vol24h
+            )
+            
+            # Отправляем алерт
+            text = build_revival_text_gt(
+                inputs,
+                chain.capitalize(),
+                vol1h,
+                vol24h,
+                "QuickNode"
+            )
+            notifier.send(text)
+            
+            # Устанавливаем cooldown
+            with storage.get_conn() as conn:
+                storage.set_last_alert_ts(conn, pool_id, int(datetime.now(timezone.utc).timestamp()))
+            
+            alerts_sent += 1
+    
+    return alerts_sent
 
 
 def run_minute_cycle(cfg: Config, *, cycle_idx: int) -> dict:

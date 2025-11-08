@@ -21,7 +21,25 @@ class Config:
     tg_chat_id: str
     tg_parse_mode: str
 
-    # GeckoTerminal Megafilter (единый источник данных)
+    # QuickNode Configuration
+    quicknode_rpc_url: str
+    quicknode_ws_url: str
+    quicknode_api_key: str
+    
+    # QuickNode Performance Settings
+    quicknode_batch_size: int
+    pool_refresh_interval_hours: int
+    volume_monitoring_interval_min: int
+    max_monitored_pools: int
+    
+    # Solana-specific settings
+    solana_raydium_program_id: str
+    
+    # QuickNode Enhanced APIs
+    use_quicknode_enhanced_apis: bool
+    quicknode_dex_metrics_enabled: bool
+
+    # GeckoTerminal Megafilter (LEGACY - сохраняем для обратной совместимости)
     gt_megafilter_base: str
     gt_megafilter_api_key: str
     gt_megafilter_calls_per_min: int
@@ -68,10 +86,28 @@ class Config:
         tg_chat_id = os.getenv("TG_CHAT_ID", "")
         tg_parse_mode = os.getenv("TG_PARSE_MODE", "Markdown")
 
-        # GeckoTerminal Megafilter (единый источник данных)
+        # QuickNode Configuration
+        quicknode_rpc_url = os.getenv("QUICKNODE_RPC_URL", "")
+        quicknode_ws_url = os.getenv("QUICKNODE_WS_URL", "")
+        quicknode_api_key = os.getenv("QUICKNODE_API_KEY", "")
+        
+        # QuickNode Performance Settings
+        quicknode_batch_size = int(os.getenv("QUICKNODE_BATCH_SIZE", "100"))
+        pool_refresh_interval_hours = int(os.getenv("POOL_REFRESH_INTERVAL_HOURS", "6"))
+        volume_monitoring_interval_min = int(os.getenv("VOLUME_MONITORING_INTERVAL_MIN", "1"))
+        max_monitored_pools = int(os.getenv("MAX_MONITORED_POOLS", "5000"))
+        
+        # Solana-specific settings
+        solana_raydium_program_id = os.getenv("SOLANA_RAYDIUM_PROGRAM_ID", "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
+        
+        # QuickNode Enhanced APIs
+        use_quicknode_enhanced_apis = _as_bool(os.getenv("USE_QUICKNODE_ENHANCED_APIS", "false"))
+        quicknode_dex_metrics_enabled = _as_bool(os.getenv("QUICKNODE_DEX_METRICS_ENABLED", "false"))
+
+        # GeckoTerminal Megafilter (LEGACY - сохраняем для обратной совместимости)
         gt_megafilter_base = os.getenv("GT_MEGAFILTER_BASE", "https://pro-api.coingecko.com/api/v3/onchain")
         gt_megafilter_api_key = os.getenv("GT_MEGAFILTER_API_KEY", "")
-        gt_megafilter_calls_per_min = int(os.getenv("GT_MEGAFILTER_CALLS_PER_MIN", "30"))  # 1 запрос в минуту
+        gt_megafilter_calls_per_min = int(os.getenv("GT_MEGAFILTER_CALLS_PER_MIN", "30"))
         gt_megafilter_page_size = int(os.getenv("GT_MEGAFILTER_PAGE_SIZE", "100"))
         gt_megafilter_sort = os.getenv("GT_MEGAFILTER_SORT", "h6_trending")
 
@@ -112,6 +148,16 @@ class Config:
             tg_bot_token=tg_bot_token,
             tg_chat_id=tg_chat_id,
             tg_parse_mode=tg_parse_mode,
+            quicknode_rpc_url=quicknode_rpc_url,
+            quicknode_ws_url=quicknode_ws_url,
+            quicknode_api_key=quicknode_api_key,
+            quicknode_batch_size=quicknode_batch_size,
+            pool_refresh_interval_hours=pool_refresh_interval_hours,
+            volume_monitoring_interval_min=volume_monitoring_interval_min,
+            max_monitored_pools=max_monitored_pools,
+            solana_raydium_program_id=solana_raydium_program_id,
+            use_quicknode_enhanced_apis=use_quicknode_enhanced_apis,
+            quicknode_dex_metrics_enabled=quicknode_dex_metrics_enabled,
             gt_megafilter_base=gt_megafilter_base,
             gt_megafilter_api_key=gt_megafilter_api_key,
             gt_megafilter_calls_per_min=gt_megafilter_calls_per_min,
