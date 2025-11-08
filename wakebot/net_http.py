@@ -47,12 +47,24 @@ class HttpClient:
             log_fn=self._log,
         )
         
-        # QuickNode rate limiter
+        # QuickNode rate limiter - ИСПРАВЛЕНО: адаптивно под план
+        # Essential: 10M requests/month ≈ 3.8 requests/sec
+        # Growth: 50M requests/month ≈ 19.2 requests/sec
+        # Enterprise: custom (100+ requests/sec)
+        plan_limits = {
+            "essential": 3.8,
+            "growth": 19.2,
+            "enterprise": 100.0
+        }
+        
+        quicknode_plan = getattr(cfg, 'quicknode_plan', 'essential')
+        base_rps = plan_limits.get(quicknode_plan, 3.8)
+        
         self._quicknode_limiter = ApiRateLimiter(
-            max_concurrency=8,  # QuickNode обычно позволяет больше
+            max_concurrency=10,
             adaptive=AdaptiveParams(
-                base_rps=10.0,  # QuickNode обычно позволяет больше RPS
-                min_rps=1.0,
+                base_rps=base_rps,
+                min_rps=base_rps * 0.1,
                 backoff_threshold=0.1,
                 recover_threshold=0.02,
                 decrease_step=0.50,
@@ -155,48 +167,25 @@ class HttpClient:
     def get_cycle_429(self) -> int:
         return int(self._cycle_429)
 
-    # ----- QuickNode methods -----
-    def quicknode_solana_rpc(self, payload: Dict, timeout: float = 30.0) -> dict[str, Any]:
-        """
-        QuickNode Solana JSON-RPC вызовы
-        """
-        sleep_for = self._quicknode_limiter.acquire()
-        if sleep_for > 0:
-            self._log(f"[quicknode/solana] throttling sleep {sleep_for:.3f}s")
-            time.sleep(min(sleep_for, 5.0))
-        
-        try:
-            session = self._session()
-            url = self._cfg.quicknode_rpc_url
-            
-            headers = {
-                "Content-Type": "application/json",
-            }
-            
-            # QuickNode может использовать API key в headers или URL
-            if self._cfg.quicknode_api_key:
-                headers["Authorization"] = f"Bearer {self._cfg.quicknode_api_key}"
-            
-            r = session.post(url, json=payload, headers=headers, timeout=timeout)
-            status = r.status_code
-            self._quicknode_limiter.record_status(status)
-
-            if status == 429:
-                self._handle_rate_limit(r)
-            
-            r.raise_for_status()
-            return r.json() or {}
-            
-        except Exception as e:
-            self._log(f"[quicknode/solana] RPC error: {e}")
-            return {}
-        finally:
-            self._quicknode_limiter.release()
-            self._cycle_requests += 1
+    # ----- QuickNode methods - ИСПРАВЛЕНО -----
+    def _get_quicknode_url(self, network: str) -> str:
+        """Получаем правильный URL для конкретной сети"""
+        urls = {
+            "solana": self._cfg.quicknode_solana_url,
+            "ethereum": self._cfg.quicknode_ethereum_url,
+            "base": self._cfg.quicknode_base_url,
+            "bsc": self._cfg.quicknode_bsc_url
+        }
+        url = urls.get(network, "")
+        if not url:
+            self._log(f"[quicknode] WARNING: No URL configured for network: {network}")
+        return url
     
-    def quicknode_evm_rpc(self, network: str, payload: Dict, timeout: float = 30.0) -> dict[str, Any]:
+    def quicknode_rpc_call(self, network: str, method: str, params: List = None, timeout: float = 30.0) -> dict[str, Any]:
         """
-        QuickNode EVM JSON-RPC вызовы для конкретной сети
+        УНИВЕРСАЛЬНЫЙ RPC вызов для любой сети
+        ИСПРАВЛЕНО: Токен уже в URL, headers НЕ нужны
+        Документация: https://docs.quicknode.com/core-products/rpc-endpoints
         """
         sleep_for = self._quicknode_limiter.acquire()
         if sleep_for > 0:
@@ -205,26 +194,32 @@ class HttpClient:
         
         try:
             session = self._session()
-            # QuickNode предоставляет отдельные endpoints для разных сетей
-            # Пользователь должен настроить правильный URL в конфигурации
-            url = self._cfg.quicknode_rpc_url
+            url = self._get_quicknode_url(network)
             
-            headers = {
-                "Content-Type": "application/json",
+            if not url:
+                return {}
+            
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": params or []
             }
             
-            if self._cfg.quicknode_api_key:
-                headers["Authorization"] = f"Bearer {self._cfg.quicknode_api_key}"
+            # ИСПРАВЛЕНО: QuickNode RPC НЕ требует Authorization header
+            # Токен уже в URL: https://your-endpoint.quiknode.pro/token/
+            headers = {"Content-Type": "application/json"}
             
             r = session.post(url, json=payload, headers=headers, timeout=timeout)
             status = r.status_code
             self._quicknode_limiter.record_status(status)
 
             if status == 429:
-                self._handle_rate_limit(r)
+                self._handle_quicknode_rate_limit(r)
             
             r.raise_for_status()
-            return r.json() or {}
+            result = r.json() or {}
+            return result.get('result', {}) if 'result' in result else result
             
         except Exception as e:
             self._log(f"[quicknode/{network}] RPC error: {e}")
@@ -233,25 +228,58 @@ class HttpClient:
             self._quicknode_limiter.release()
             self._cycle_requests += 1
     
-    def quicknode_batch_rpc(self, requests: List[Dict], timeout: float = 60.0) -> list[dict]:
+    def quicknode_solana_rpc(self, payload: Dict, timeout: float = 30.0) -> dict[str, Any]:
+        """
+        Solana RPC - обертка для обратной совместимости
+        """
+        method = payload.get('method', '')
+        params = payload.get('params', [])
+        response = self.quicknode_rpc_call('solana', method, params, timeout)
+        # Возвращаем в старом формате для совместимости
+        return {'result': response} if response else {}
+    
+    def quicknode_evm_rpc(self, network: str, payload: Dict, timeout: float = 30.0) -> dict[str, Any]:
+        """
+        EVM RPC - обертка для обратной совместимости
+        ИСПРАВЛЕНО: использует универсальный quicknode_rpc_call
+        """
+        method = payload.get('method', '')
+        params = payload.get('params', [])
+        response = self.quicknode_rpc_call(network, method, params, timeout)
+        # Возвращаем в старом формате для совместимости
+        return {'result': response} if response else {}
+    
+    def quicknode_batch_rpc(self, network: str, requests: List[Dict], timeout: float = 60.0) -> list[dict]:
         """
         Batch RPC запросы к QuickNode
+        ИСПРАВЛЕНО: До 100 запросов в батче, токен в URL
+        Документация: https://docs.quicknode.com/core-products/batch-requests
         """
+        # QuickNode поддерживает до 100 запросов в батче
+        if len(requests) > 100:
+            self._log(f"[quicknode/batch] WARNING: {len(requests)} requests, max 100. Splitting...")
+            # Разбиваем на батчи по 100
+            all_responses = []
+            for i in range(0, len(requests), 100):
+                batch = requests[i:i+100]
+                responses = self.quicknode_batch_rpc(network, batch, timeout)
+                all_responses.extend(responses)
+            return all_responses
+        
         sleep_for = self._quicknode_limiter.acquire()
         if sleep_for > 0:
-            self._log(f"[quicknode/batch] throttling sleep {sleep_for:.3f}s")
+            self._log(f"[quicknode/{network}/batch] throttling sleep {sleep_for:.3f}s")
             time.sleep(min(sleep_for, 5.0))
         
         try:
             session = self._session()
-            url = self._cfg.quicknode_rpc_url
+            url = self._get_quicknode_url(network)
             
-            headers = {
-                "Content-Type": "application/json",
-            }
+            if not url:
+                return []
             
-            if self._cfg.quicknode_api_key:
-                headers["Authorization"] = f"Bearer {self._cfg.quicknode_api_key}"
+            # ИСПРАВЛЕНО: QuickNode RPC НЕ требует Authorization header
+            headers = {"Content-Type": "application/json"}
             
             # Batch запрос - массив RPC запросов
             r = session.post(url, json=requests, headers=headers, timeout=timeout)
@@ -259,7 +287,7 @@ class HttpClient:
             self._quicknode_limiter.record_status(status)
 
             if status == 429:
-                self._handle_rate_limit(r)
+                self._handle_quicknode_rate_limit(r)
             
             r.raise_for_status()
             response = r.json()
@@ -268,25 +296,33 @@ class HttpClient:
             return response if isinstance(response, list) else []
             
         except Exception as e:
-            self._log(f"[quicknode/batch] RPC error: {e}")
+            self._log(f"[quicknode/{network}/batch] RPC error: {e}")
             return []
         finally:
             self._quicknode_limiter.release()
             self._cycle_requests += len(requests)  # Учитываем все запросы в батче
     
-    def _handle_rate_limit(self, response):
-        """Обработка rate limiting от QuickNode"""
+    def _handle_quicknode_rate_limit(self, response):
+        """
+        Обработка rate limiting от QuickNode
+        ИСПРАВЛЕНО: QuickNode использует стандартный Retry-After
+        """
         self._cycle_429 += 1
         retry_after = response.headers.get("Retry-After")
+        
         if retry_after:
             sleep_s = _parse_retry_after(retry_after)
             if sleep_s and sleep_s > 0:
-                actual_sleep = min(sleep_s, 30.0)
-                self._log(f"[quicknode] 429 Retry-After {sleep_s:.3f}s")
+                # QuickNode может давать большие Retry-After, лимитируем
+                actual_sleep = min(sleep_s, 60.0)  # Максимум 60 секунд
+                self._log(f"[quicknode] 429 Retry-After {sleep_s:.3f}s (sleeping {actual_sleep:.1f}s)")
                 time.sleep(actual_sleep)
                 self.add_penalty(actual_sleep)
         else:
-            self.add_penalty(1.0)
+            # Дефолтная пауза при 429 без Retry-After
+            self._log(f"[quicknode] 429 without Retry-After, using default 5s pause")
+            time.sleep(5.0)
+            self.add_penalty(5.0)
 
     # ----- Rate limiter health monitoring -----
     def log_ratelimit_health(self, prefix: str = "megafilter") -> None:

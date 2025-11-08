@@ -32,28 +32,31 @@ class SolanaPoolCollector:
     
     def get_all_raydium_pools(self) -> List[Dict]:
         """
-        Получаем ВСЕ пулы Raydium через getProgramAccounts
+        ОПТИМИЗИРОВАНО: Получаем ВСЕ пулы Raydium через getProgramAccounts
+        Документация: https://docs.quicknode.com/solana/methods/getprogramaccounts
         Returns: List[Dict] с полями: address, base_mint, quote_mint, lp_mint, etc.
         """
         self._log_fn("Fetching all Raydium pools via QuickNode...")
         
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getProgramAccounts",
-            "params": [
-                self.RAYDIUM_AMM_PROGRAM,
-                {
-                    "filters": [{"dataSize": 752}],  # Raydium AMM V4 pool size
-                    "encoding": "base64",
-                    "withContext": True
-                }
-            ]
-        }
+        # ОПТИМИЗИРОВАНО: используем новый универсальный метод
+        params = [
+            self.RAYDIUM_AMM_PROGRAM,
+            {
+                "filters": [
+                    {"dataSize": 752},  # Raydium AMM V4 pool size
+                    # Можно добавить фильтр по статусу для активных пулов:
+                    # {"memcmp": {"offset": 1, "bytes": base58.b58encode(b'\x01').decode()}}
+                ],
+                "encoding": "base64",
+                "withContext": True,
+                "commitment": "finalized"  # Используем finalized для надежности
+            }
+        ]
         
         try:
-            response = self.http.quicknode_solana_rpc(payload)
-            pools = self._decode_pool_accounts(response)
+            # ИСПРАВЛЕНО: используем универсальный quicknode_rpc_call
+            response = self.http.quicknode_rpc_call('solana', 'getProgramAccounts', params)
+            pools = self._decode_pool_accounts({'result': response})
             self._log_fn(f"Successfully decoded {len(pools)} Raydium pools")
             return pools
         except Exception as e:
@@ -145,25 +148,21 @@ class SolanaPoolCollector:
     def get_pool_creation_time(self, pool_address: str) -> Optional[int]:
         """
         Определяем время создания пула через первую транзакцию
+        ОПТИМИЗИРОВАНО: использует универсальный API
         """
-        payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getSignaturesForAddress",
-            "params": [
+        try:
+            # ИСПРАВЛЕНО: используем quicknode_rpc_call
+            params = [
                 pool_address,
                 {
                     "limit": 1000,  # Берем больше чтобы найти самую старую
                     "commitment": "finalized"
                 }
             ]
-        }
-        
-        try:
-            response = self.http.quicknode_solana_rpc(payload)
-            signatures = response.get('result', [])
             
-            if not signatures:
+            signatures = self.http.quicknode_rpc_call('solana', 'getSignaturesForAddress', params)
+            
+            if not signatures or not isinstance(signatures, list):
                 return None
             
             # Берем самую старую транзакцию (последнюю в списке)
@@ -173,24 +172,18 @@ class SolanaPoolCollector:
                 return None
             
             # Получаем детали транзакции
-            tx_payload = {
-                "jsonrpc": "2.0",
-                "id": 1, 
-                "method": "getTransaction",
-                "params": [
-                    oldest_tx_sig,
-                    {
-                        "encoding": "json",
-                        "maxSupportedTransactionVersion": 0,
-                        "commitment": "finalized"
-                    }
-                ]
-            }
+            tx_params = [
+                oldest_tx_sig,
+                {
+                    "encoding": "json",
+                    "maxSupportedTransactionVersion": 0,
+                    "commitment": "finalized"
+                }
+            ]
             
-            tx_response = self.http.quicknode_solana_rpc(tx_payload)
-            tx_data = tx_response.get('result', {})
+            tx_data = self.http.quicknode_rpc_call('solana', 'getTransaction', tx_params)
             
-            return tx_data.get('blockTime')
+            return tx_data.get('blockTime') if tx_data else None
             
         except Exception as e:
             self._log_fn(f"Error getting pool creation time for {pool_address}: {e}")
@@ -198,7 +191,8 @@ class SolanaPoolCollector:
     
     def batch_get_pool_creation_times(self, pool_addresses: List[str]) -> Dict[str, int]:
         """
-        Получаем времена создания для батча пулов одновременно
+        ОПТИМИЗИРОВАНО: Получаем времена создания для батча пулов
+        ИСПРАВЛЕНО: Batch поддерживает до 100 запросов
         """
         results = {}
         
@@ -219,7 +213,8 @@ class SolanaPoolCollector:
             })
         
         try:
-            responses = self.http.quicknode_batch_rpc(batch_requests)
+            # ИСПРАВЛЕНО: передаем network parameter
+            responses = self.http.quicknode_batch_rpc('solana', batch_requests)
             
             # Обрабатываем ответы
             for i, response in enumerate(responses):
@@ -229,15 +224,12 @@ class SolanaPoolCollector:
                 pool_address = pool_addresses[i]
                 signatures = response.get('result', [])
                 
-                if signatures:
+                if signatures and isinstance(signatures, list):
                     # Берем самую старую транзакцию
-                    oldest_sig = signatures[-1].get('signature', '')
-                    if oldest_sig:
-                        # Получаем blockTime из самой старой транзакции
-                        # Для упрощения используем blockTime из getSignaturesForAddress
-                        block_time = signatures[-1].get('blockTime')
-                        if block_time:
-                            results[pool_address] = block_time
+                    oldest_sig = signatures[-1] if signatures else {}
+                    block_time = oldest_sig.get('blockTime')
+                    if block_time:
+                        results[pool_address] = block_time
         
         except Exception as e:
             self._log_fn(f"Error in batch_get_pool_creation_times: {e}")
