@@ -21,7 +21,30 @@ class Config:
     tg_chat_id: str
     tg_parse_mode: str
 
-    # GeckoTerminal Megafilter (единый источник данных)
+    # QuickNode Configuration - ИСПРАВЛЕНО: отдельные URLs для каждой сети
+    quicknode_solana_url: str
+    quicknode_ethereum_url: str
+    quicknode_base_url: str
+    quicknode_bsc_url: str
+    quicknode_api_key: str  # Для Marketplace APIs (опционально)
+    
+    # QuickNode Plan - для адаптивного rate limiting
+    quicknode_plan: str  # essential, growth, enterprise
+    
+    # QuickNode Performance Settings
+    quicknode_batch_size: int
+    pool_refresh_interval_hours: int
+    volume_monitoring_interval_min: int
+    max_monitored_pools: int
+    
+    # Solana-specific settings
+    solana_raydium_program_id: str
+    
+    # QuickNode Enhanced/Marketplace APIs
+    use_marketplace_apis: bool
+    marketplace_api_names: List[str]
+
+    # GeckoTerminal Megafilter (LEGACY - сохраняем для обратной совместимости)
     gt_megafilter_base: str
     gt_megafilter_api_key: str
     gt_megafilter_calls_per_min: int
@@ -68,10 +91,34 @@ class Config:
         tg_chat_id = os.getenv("TG_CHAT_ID", "")
         tg_parse_mode = os.getenv("TG_PARSE_MODE", "Markdown")
 
-        # GeckoTerminal Megafilter (единый источник данных)
+        # QuickNode Configuration - ИСПРАВЛЕНО: отдельные URLs для каждой сети
+        quicknode_solana_url = os.getenv("QUICKNODE_SOLANA_URL", "")
+        quicknode_ethereum_url = os.getenv("QUICKNODE_ETHEREUM_URL", "")
+        quicknode_base_url = os.getenv("QUICKNODE_BASE_URL", "")
+        quicknode_bsc_url = os.getenv("QUICKNODE_BSC_URL", "")
+        quicknode_api_key = os.getenv("QUICKNODE_API_KEY", "")  # Опционально для Marketplace
+        
+        # QuickNode Plan для rate limiting
+        quicknode_plan = os.getenv("QUICKNODE_PLAN", "essential")  # essential, growth, enterprise
+        
+        # QuickNode Performance Settings
+        quicknode_batch_size = int(os.getenv("QUICKNODE_BATCH_SIZE", "100"))
+        pool_refresh_interval_hours = int(os.getenv("POOL_REFRESH_INTERVAL_HOURS", "6"))
+        volume_monitoring_interval_min = int(os.getenv("VOLUME_MONITORING_INTERVAL_MIN", "1"))
+        max_monitored_pools = int(os.getenv("MAX_MONITORED_POOLS", "5000"))
+        
+        # Solana-specific settings
+        solana_raydium_program_id = os.getenv("SOLANA_RAYDIUM_PROGRAM_ID", "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8")
+        
+        # QuickNode Marketplace APIs
+        use_marketplace_apis = _as_bool(os.getenv("USE_MARKETPLACE_APIS", "false"))
+        marketplace_api_names_str = os.getenv("MARKETPLACE_API_NAMES", "")
+        marketplace_api_names = [api.strip() for api in marketplace_api_names_str.split(",") if api.strip()]
+
+        # GeckoTerminal Megafilter (LEGACY - сохраняем для обратной совместимости)
         gt_megafilter_base = os.getenv("GT_MEGAFILTER_BASE", "https://pro-api.coingecko.com/api/v3/onchain")
         gt_megafilter_api_key = os.getenv("GT_MEGAFILTER_API_KEY", "")
-        gt_megafilter_calls_per_min = int(os.getenv("GT_MEGAFILTER_CALLS_PER_MIN", "30"))  # 1 запрос в минуту
+        gt_megafilter_calls_per_min = int(os.getenv("GT_MEGAFILTER_CALLS_PER_MIN", "30"))
         gt_megafilter_page_size = int(os.getenv("GT_MEGAFILTER_PAGE_SIZE", "100"))
         gt_megafilter_sort = os.getenv("GT_MEGAFILTER_SORT", "h6_trending")
 
@@ -112,6 +159,19 @@ class Config:
             tg_bot_token=tg_bot_token,
             tg_chat_id=tg_chat_id,
             tg_parse_mode=tg_parse_mode,
+            quicknode_solana_url=quicknode_solana_url,
+            quicknode_ethereum_url=quicknode_ethereum_url,
+            quicknode_base_url=quicknode_base_url,
+            quicknode_bsc_url=quicknode_bsc_url,
+            quicknode_api_key=quicknode_api_key,
+            quicknode_plan=quicknode_plan,
+            quicknode_batch_size=quicknode_batch_size,
+            pool_refresh_interval_hours=pool_refresh_interval_hours,
+            volume_monitoring_interval_min=volume_monitoring_interval_min,
+            max_monitored_pools=max_monitored_pools,
+            solana_raydium_program_id=solana_raydium_program_id,
+            use_marketplace_apis=use_marketplace_apis,
+            marketplace_api_names=marketplace_api_names,
             gt_megafilter_base=gt_megafilter_base,
             gt_megafilter_api_key=gt_megafilter_api_key,
             gt_megafilter_calls_per_min=gt_megafilter_calls_per_min,
